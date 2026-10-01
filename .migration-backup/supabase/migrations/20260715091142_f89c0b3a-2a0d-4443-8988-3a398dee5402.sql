@@ -1,0 +1,1 @@
+ALTER TABLE public.user_bundle_items ADD COLUMN IF NOT EXISTS priority integer NOT NULL DEFAULT 1;

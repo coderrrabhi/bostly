@@ -1,0 +1,38 @@
+kind = "web"
+previewPath = "/"
+title = "Boostly Pro"
+description = "An organic social media marketing platform for managing services, engagement campaigns, orders, subscriptions, wallet activity, provider connections, support, and administrative operations."
+version = "1.0.0"
+id = "artifacts/boostly-pro"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21544
+
+[services.development]
+run = "pnpm --filter @workspace/boostly-pro run dev"
+
+[services.production]
+
+[services.production.build]
+args = [ "pnpm", "--filter", "@workspace/boostly-pro", "run", "build" ]
+
+[services.production.build.env]
+NODE_ENV = "production"
+BASE_PATH = "/"
+
+[services.production.run]
+args = [ "node", "artifacts/boostly-pro/server/serve.mjs" ]
+
+[services.production.run.env]
+PORT = "21544"
+NODE_ENV = "production"
+
+[services.production.health.startup]
+path = "/"
+
+[services.env]
+PORT = "21544"
+BASE_PATH = "/"

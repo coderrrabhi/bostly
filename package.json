@@ -1,0 +1,59 @@
+{
+  "name": "workspace",
+  "version": "0.0.0",
+  "license": "MIT",
+  "scripts": {
+    "build": "cd artifacts/boostly-pro && ./node_modules/.bin/vite build --config vite.config.ts && rm -rf ../../dist && cp -r dist/public ../../dist",
+    "typecheck:libs": "tsc --build",
+    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
+    "server:install": "cd server && npm install",
+    "server:build": "cd server && npm run build",
+    "db:init": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f schema.sql",
+    "start": "cd server && npm start",
+    "dev": "cd artifacts/boostly-pro && PORT=8080 ./node_modules/.bin/vite --config vite.config.ts --host 0.0.0.0 --port 8080",
+    "build:all": "pnpm run typecheck && pnpm -r --if-present run build",
+    "build:dev": "cd artifacts/boostly-pro && ./node_modules/.bin/vite build --config vite.config.ts && rm -rf ../../dist && cp -r dist/public ../../dist"
+  },
+  "private": true,
+  "dependencies": {
+    "@fontsource/manrope": "^5.3.0",
+    "@fontsource/sora": "^5.3.0",
+    "@replit/connectors-sdk": "^0.4.1"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.6",
+    "typescript": "~5.9.3"
+  },
+  "workspaces": {
+    "packages": [
+      "artifacts/*",
+      "lib/*",
+      "lib/integrations/*",
+      "scripts"
+    ],
+    "catalog": {
+      "@replit/vite-plugin-cartographer": "^0.5.21",
+      "@replit/vite-plugin-dev-banner": "^0.1.1",
+      "@replit/vite-plugin-runtime-error-modal": "^0.0.6",
+      "@tailwindcss/vite": "^4.1.14",
+      "@tanstack/react-query": "^5.90.21",
+      "@types/node": "^25.3.3",
+      "@types/react": "^19.2.0",
+      "@types/react-dom": "^19.2.0",
+      "@vitejs/plugin-react": "^5.0.4",
+      "class-variance-authority": "^0.7.1",
+      "clsx": "^2.1.1",
+      "drizzle-orm": "^0.45.2",
+      "framer-motion": "^12.23.24",
+      "lucide-react": "^0.545.0",
+      "react": "19.1.0",
+      "react-dom": "19.1.0",
+      "tailwind-merge": "^3.3.1",
+      "tailwindcss": "^4.1.14",
+      "tsx": "^4.21.0",
+      "vite": "^7.3.2",
+      "wouter": "^3.3.5",
+      "zod": "3.25.76"
+    }
+  }
+}

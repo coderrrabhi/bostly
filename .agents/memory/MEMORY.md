@@ -1,0 +1,4 @@
+- [Lovable database imports](lovable-database-imports.md) — preserve Supabase backups in an isolated schema and link safe identity data to Clerk by email.
+- [Bundle provider mappings](bundle-provider-mappings.md) — service mappings belong to stable provider accounts and must survive API-key rotation or temporary inactivity.
+- [Live-site latency model](live-site-latency.md) — India↔North America RTT dominates; cut round trips/bytes, geography change needs a remix; CDP-based logged-in verification recipe.
+- [Legacy tables lack indexes](legacy-tables-indexes.md) — restored lovable_legacy tables have no PKs; add indexes via the concurrent pre-migrate script plus an IF NOT EXISTS migration.
