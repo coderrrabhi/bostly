@@ -59,19 +59,7 @@ export function Sidebar({ onClose }: SidebarProps) {
     return () => window.clearTimeout(t);
   }, [pendingPath]);
 
-  useEffect(() => {
-    const idleWindow = window as Window & {
-      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-      cancelIdleCallback?: (id: number) => void;
-    };
-    const timeoutId = window.setTimeout(preloadSidebarRoutes, 800);
-    const idleId = idleWindow.requestIdleCallback?.(preloadSidebarRoutes, { timeout: 1500 });
-
-    return () => {
-      window.clearTimeout(timeoutId);
-      if (idleId !== undefined) idleWindow.cancelIdleCallback?.(idleId);
-    };
-  }, []);
+  // Aggressive preload disabled to keep network and rendering fast
 
   const { data: providerStats } = useQuery({
     queryKey: ['sidebar-provider-balance', user?.id],
