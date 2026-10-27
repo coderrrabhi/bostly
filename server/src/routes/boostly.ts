@@ -21,60 +21,20 @@ function userId(req: AuthenticatedRequest): string {
   return req.userId;
 }
 
-/** Copies the account's legacy profile/wallet/role into the app tables on first use. */
-const accountCache = new Map<string, { expiresAt: number; value: Promise<string | null> }>();
-
-async function provisionAccount(id: string): Promise<string | null> {
-  const authUser = await pool.query<{ email: string; full_name: string | null }>(
-    "SELECT email, raw_user_meta_data->>'full_name' AS full_name FROM lovable_legacy.auth_users WHERE id=$1::uuid",
+// Public compatibility views already expose the canonical account rows to this
+// server. Reading a session must never copy/reset balances or roles, nor attempt
+// ON CONFLICT inserts into those views. New rows are provisioned at signup.
+async function ensureAccount(id: string): Promise<string | null> {
+  const result = await pool.query<{ id: string }>(
+    "SELECT id::text FROM lovable_legacy.auth_users WHERE id=$1::uuid",
     [id],
   );
-  const email = authUser.rows[0]?.email ?? `${id}@local`;
-  const clerkName = authUser.rows[0]?.full_name || null;
-  const legacyId = authUser.rows[0] ? id : null;
-  const legacy = legacyId
-    ? await pool.query<{
-        full_name: string | null;
-        currency: string | null;
-        balance: string | null;
-        total_deposited: string | null;
-        total_spent: string | null;
-        role: "admin" | "moderator" | "user" | null;
-      }>(
-        `SELECT p.full_name, p.currency, w.balance, w.total_deposited, w.total_spent, r.role::text AS role
-           FROM lovable_legacy.profiles p
-           LEFT JOIN lovable_legacy.wallets w ON w.user_id = p.user_id
-           LEFT JOIN lovable_legacy.user_roles r ON r.user_id = p.user_id
-          WHERE p.user_id = $1::uuid
-          LIMIT 1`,
-        [legacyId],
-      )
-    : { rows: [] };
-  const old = legacy.rows[0];
-  await db.transaction(async (tx) => {
-    const [profile] = await tx.select({ id: profilesTable.id }).from(profilesTable).where(eq(profilesTable.userId, id)).limit(1);
-    if (!profile) {
-      await tx.insert(profilesTable).values({ userId: id, email, fullName: old?.full_name ?? clerkName, currency: old?.currency ?? "USD" }).onConflictDoNothing();
-      await tx.insert(walletsTable).values({ userId: id, balance: old?.balance ?? "0", totalDeposited: old?.total_deposited ?? "0", totalSpent: old?.total_spent ?? "0" }).onConflictDoNothing();
-      await tx.insert(userRolesTable).values({ userId: id, role: old?.role ?? "user" }).onConflictDoNothing();
-    } else if (old) {
-      await tx.update(profilesTable).set({ email, fullName: old.full_name ?? clerkName, currency: old.currency ?? "USD" }).where(eq(profilesTable.userId, id));
-      await tx.update(walletsTable).set({ balance: old.balance ?? "0", totalDeposited: old.total_deposited ?? "0", totalSpent: old.total_spent ?? "0" }).where(eq(walletsTable.userId, id));
-      await tx.update(userRolesTable).set({ role: old.role ?? "user" }).where(eq(userRolesTable.userId, id));
-    }
-  });
-  return legacyId;
-}
-
-async function ensureAccount(id: string): Promise<string | null> {
-  const cached = accountCache.get(id);
-  if (cached && cached.expiresAt > Date.now()) return cached.value;
-  const value = provisionAccount(id).catch((error) => {
-    accountCache.delete(id);
+  if (!result.rows[0]) {
+    const error = new Error("Unauthorized");
+    Object.assign(error, { status: 401 });
     throw error;
-  });
-  accountCache.set(id, { expiresAt: Date.now() + 15 * 60_000, value });
-  return value;
+  }
+  return result.rows[0].id;
 }
 
 // Lightweight identity payload for the auth provider: what every page needs

@@ -86,13 +86,6 @@ export const ordersTable = pgTable("orders", {
   startCount: integer("start_count"),
   remains: integer("remains"),
   providerOrderId: text("provider_order_id"),
-  isDripFeed: boolean("is_drip_feed").notNull().default(false),
-  dripRuns: integer("drip_runs"),
-  dripInterval: integer("drip_interval"),
-  dripIntervalUnit: text("drip_interval_unit"),
-  isOrganicMode: boolean("is_organic_mode").notNull().default(false),
-  variancePercent: integer("variance_percent").notNull().default(25),
-  peakHoursEnabled: boolean("peak_hours_enabled").notNull().default(true),
   errorMessage: text("error_message"),
   ...timestamps,
 });

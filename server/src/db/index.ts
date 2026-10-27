@@ -19,6 +19,9 @@ if (!process.env.DATABASE_URL) {
 function createPool(max: number): pg.Pool {
   return new Pool({
     connectionString: process.env.DATABASE_URL,
+    // ORM tables are the public compatibility views, never the RLS-filtered
+    // legacy base tables. Legacy operations already qualify their schema.
+    options: "-c search_path=public,extensions",
     max,
     connectionTimeoutMillis: 10_000,
     idleTimeoutMillis: 30_000,

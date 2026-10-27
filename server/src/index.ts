@@ -15,7 +15,7 @@ const staticDir = path.resolve(
   process.env["STATIC_DIR"] ?? path.join(process.cwd(), "../artifacts/boostly-pro/dist/public"),
 );
 if (existsSync(path.join(staticDir, "index.html"))) {
-  app.use(sirv(staticDir, { single: true, brotli: true, gzip: true, etag: true }));
+  app.use(sirv(staticDir, { single: true, brotli: false, gzip: false, etag: true }));
   logger.info({ staticDir }, "Serving frontend build");
 }
 

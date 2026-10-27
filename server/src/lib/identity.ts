@@ -9,7 +9,7 @@ export function resolveLegacyId(userId: string): Promise<string> {
 
 export async function isLegacyAdmin(legacyId: string): Promise<boolean> {
   const role = await pool.query<{ role: string }>(
-    "SELECT role::text AS role FROM lovable_legacy.user_roles WHERE user_id = $1::uuid AND role = 'admin' LIMIT 1",
+    "SELECT role::text AS role FROM public.user_roles WHERE user_id = $1::uuid AND role = 'admin' LIMIT 1",
     [legacyId],
   );
   return role.rows[0]?.role === "admin";

@@ -10,6 +10,12 @@ import { Label } from "@/components/ui/label";
 import { PageMeta } from "@/components/seo/PageMeta";
 import { supabase } from "@/integrations/supabase/client";
 
+async function postAuth(path: string, body: Record<string, string>) {
+  const res = await fetch(apiUrl(path), { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || "Something went wrong. Please try again.");
+}
+
 const loginSchema = z.object({
   email: z.string().trim().email("Invalid email address"),
   password: z.string().min(6, "Password must be at least 6 characters"),
@@ -73,18 +79,13 @@ export default function Auth() {
     try {
       if (mode === "login") {
         const credentials = loginSchema.parse({ email, password });
-        const cloudResult = await supabase.auth.signInWithPassword({ email: credentials.email.toLowerCase(), password: credentials.password });
-        if (cloudResult.error) throw cloudResult.error;
+        await postAuth("/auth/login", { email: credentials.email.toLowerCase(), password: credentials.password });
       } else {
         const credentials = signupSchema.parse({ email, password, fullName });
-        const cloudResult = await supabase.auth.signUp({
-          email: credentials.email.toLowerCase(),
-          password: credentials.password,
-          options: { emailRedirectTo: window.location.origin, data: { full_name: credentials.fullName } },
-        });
-        if (cloudResult.error) throw cloudResult.error;
+        await postAuth("/auth/signup", { email: credentials.email.toLowerCase(), password: credentials.password, fullName: credentials.fullName });
       }
-      navigate("/engagement-order", { replace: true });
+      window.location.href = "/engagement-order";
+      return;
     } catch (cause) {
       if (cause instanceof z.ZodError) setError(cause.issues[0]?.message || "Please check your details.");
       else setError(errorMessage(cause));

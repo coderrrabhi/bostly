@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { useAuth } from '@/hooks/useAuth';
-import { supabase } from '@/integrations/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -47,6 +46,24 @@ import {
 import { Link, Navigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { format, formatDistanceToNow } from 'date-fns';
+
+
+async function legacyCall(path: string, body: unknown): Promise<any[]> {
+  const res = await fetch(`/api/legacy/${path}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json?.error) throw new Error(typeof json?.error === 'string' ? json.error : `Request failed (${res.status})`);
+  return json.data ?? [];
+}
+const q = (table: string, filters: any[] = [], order?: { column: string; ascending: boolean }) =>
+  legacyCall('query', { table, filters, order, limit: 500 });
+const m = (table: string, action: string, values: any, filters: any[] = []) =>
+  legacyCall('mutate', { table, action, values, filters });
+const sendEmail = (_body: unknown) => Promise.resolve();
 
 interface SubscriptionRequest {
   id: string;
@@ -97,22 +114,11 @@ export default function AdminSubscriptions() {
   const { data: subscribers, isLoading: loadingSubscribers } = useQuery({
     queryKey: ['admin-active-subscribers'],
     queryFn: async () => {
-      const { data: subs, error: subsError } = await supabase
-        .from('subscriptions')
-        .select('*')
-        .eq('status', 'active')
-        .order('activated_at', { ascending: false });
-
-      if (subsError) throw subsError;
+      const subs = await q('subscriptions', [{ operator: 'eq', column: 'status', value: 'active' }], { column: 'activated_at', ascending: false });
 
       // Fetch profile info for each subscriber
       const userIds = subs.map(s => s.user_id);
-      const { data: profiles, error: profilesError } = await supabase
-        .from('profiles')
-        .select('user_id, email, full_name')
-        .in('user_id', userIds);
-
-      if (profilesError) throw profilesError;
+      const profiles = userIds.length ? await q('profiles', [{ operator: 'in', column: 'user_id', value: userIds }]) : [];
 
       return subs.map(sub => ({
         ...sub,
@@ -125,17 +131,7 @@ export default function AdminSubscriptions() {
   const { data: requests, isLoading: loadingRequests } = useQuery({
     queryKey: ['admin-subscription-requests', requestTab],
     queryFn: async () => {
-      const query = supabase
-        .from('subscription_requests')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (requestTab !== 'all') {
-        query.eq('status', requestTab);
-      }
-
-      const { data, error } = await query;
-      if (error) throw error;
+      const data = await q('subscription_requests', requestTab !== 'all' ? [{ operator: 'eq', column: 'status', value: requestTab }] : [], { column: 'created_at', ascending: false });
       return data as SubscriptionRequest[];
     },
     enabled: activeTab === 'requests',
@@ -147,13 +143,8 @@ export default function AdminSubscriptions() {
       if (!addEmail.trim()) throw new Error('Please enter email');
 
       // Find user by email
-      const { data: profile, error: profileError } = await supabase
-        .from('profiles')
-        .select('user_id, email, full_name')
-        .eq('email', addEmail.trim().toLowerCase())
-        .maybeSingle();
-
-      if (profileError) throw profileError;
+      const found = await q('profiles', [{ operator: 'eq', column: 'email', value: addEmail.trim().toLowerCase() }]);
+      const profile = found[0] as Profile | undefined;
       if (!profile) throw new Error('User not found with this email. They must sign up first.');
 
       const expiresAt = addPlanType === 'monthly'
@@ -163,29 +154,23 @@ export default function AdminSubscriptions() {
           : null; // lifetime — no expiry
 
       // Upsert subscription
-      const { error: subError } = await supabase
-        .from('subscriptions')
-        .upsert({
+      await m('subscriptions', 'upsert', {
           user_id: profile.user_id,
           plan_type: addPlanType,
           status: 'active',
           activated_at: new Date().toISOString(),
           expires_at: expiresAt,
-          activated_by: user?.id,
-        } as any, { onConflict: 'user_id' });
-
-      if (subError) throw subError;
+          
+        });
 
       // Fire-and-forget email - don't wait for response
-      supabase.functions.invoke('send-subscription-email', {
-        body: {
+      sendEmail({
           to: profile.email,
           userName: profile.full_name || profile.email.split('@')[0],
           planType: addPlanType,
           status: 'approved',
           adminNotes: `Your ${addPlanType} subscription has been activated by admin.`,
-        },
-      }).catch(err => console.error('Email failed:', err));
+        }).catch(err => console.error('Email failed:', err));
 
       return profile;
     },
@@ -202,27 +187,20 @@ export default function AdminSubscriptions() {
   // Remove subscriber mutation - OPTIMIZED: Fire-and-forget email
   const removeSubscriberMutation = useMutation({
     mutationFn: async ({ userId, email }: { userId: string; email: string }) => {
-      const { error } = await supabase
-        .from('subscriptions')
-        .update({
+      await m('subscriptions', 'update', {
           status: 'cancelled',
           plan_type: 'none',
           expires_at: new Date().toISOString(),
-        })
-        .eq('user_id', userId);
-
-      if (error) throw error;
+      }, [{ operator: 'eq', column: 'user_id', value: userId }]);
 
       // Fire-and-forget email - don't wait for response
-      supabase.functions.invoke('send-subscription-email', {
-        body: {
+      sendEmail({
           to: email,
           userName: email.split('@')[0],
           planType: 'monthly',
           status: 'rejected',
           adminNotes: 'Your subscription has been cancelled by admin.',
-        },
-      }).catch(err => console.error('Email failed:', err));
+        }).catch(err => console.error('Email failed:', err));
     },
     onSuccess: () => {
       toast.success('Subscription removed!');
@@ -241,17 +219,12 @@ export default function AdminSubscriptions() {
       if (!request) throw new Error('Request not found');
 
       // Run request update first (required)
-      const { error: requestError } = await supabase
-        .from('subscription_requests')
-        .update({
+      await m('subscription_requests', 'update', {
           status: action === 'approve' ? 'approved' : 'rejected',
-          reviewed_by: user?.id,
+          
           reviewed_at: new Date().toISOString(),
           admin_notes: adminNotes || null,
-        })
-        .eq('id', requestId);
-
-      if (requestError) throw requestError;
+      }, [{ operator: 'eq', column: 'id', value: requestId }]);
 
       // If approving, create subscription
       if (action === 'approve') {
@@ -261,30 +234,24 @@ export default function AdminSubscriptions() {
             ? new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
             : null;
 
-        const { error: subError } = await supabase
-          .from('subscriptions')
-          .upsert({
+        await m('subscriptions', 'upsert', {
             user_id: request.user_id,
             plan_type: request.plan_type,
             status: 'active',
             activated_at: new Date().toISOString(),
             expires_at: expiresAt,
-            activated_by: user?.id,
-          } as any, { onConflict: 'user_id' });
-
-        if (subError) throw subError;
+            
+          });
       }
 
       // Fire-and-forget email - don't wait for response
-      supabase.functions.invoke('send-subscription-email', {
-        body: {
+      sendEmail({
           to: request.email,
           userName: request.full_name,
           planType: request.plan_type,
           status: action === 'approve' ? 'approved' : 'rejected',
           adminNotes: adminNotes || undefined,
-        },
-      }).catch(err => console.error('Email failed:', err));
+        }).catch(err => console.error('Email failed:', err));
     },
     onSuccess: (_, { action }) => {
       toast.success(action === 'approve' ? 'Subscription activated!' : 'Request rejected.');
