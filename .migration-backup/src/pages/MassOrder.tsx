@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Rocket, Upload, Package, Pencil, Trash2, Loader2 } from 'lucide-react';
+import { Rocket, Upload, Package, Pencil, Trash2, Loader2, MessageSquare, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { NoBundleBanner } from '@/components/NoBundleBanner';
 import { coordinateEngagementSchedules, generateOrganicSchedule } from '@/lib/organic-algorithm';
@@ -20,7 +20,8 @@ interface Row {
   base_quantity: number;
   timeframe: string;
   types: Record<string, boolean>;
-  qty: Record<string, number>; // per-type quantity (custom override)
+  qty: Record<string, number>; // per-type quantity (custom override or randomized)
+  custom_comments?: string[]; // comments if provided for this link
 }
 
 const ALL_TYPES = ['views', 'likes', 'shares', 'reposts', 'comments', 'saves', 'followers'] as const;
@@ -28,35 +29,73 @@ const DEFAULT_TYPES: Record<string, boolean> = { views: true, likes: false, shar
 const TIMEFRAMES = ['Under 6 hours', 'Under 12 hours', 'Under 24 hours', 'Under 48 hours', 'Under 72 hours'];
 const CUSTOM = 'Custom';
 const isCustom = (v: string) => !TIMEFRAMES.includes(v);
+
+const DEFAULT_RATIOS_MIN: Record<string, number> = {
+  views: 100,
+  likes: 2.1,
+  shares: 0.1,
+  saves: 0.2,
+  comments: 0.03,
+  reposts: 0.03,
+  followers: 1.0,
+};
+
+const DEFAULT_RATIOS_MAX: Record<string, number> = {
+  views: 100,
+  likes: 5.0,
+  shares: 0.5,
+  saves: 0.6,
+  comments: 0.2,
+  reposts: 0.25,
+  followers: 3.0,
+};
+
 const RATIOS: Record<string, number> = { views: 1, likes: 0.031, shares: 0.013, reposts: 0.010, comments: 0.008, saves: 0.012, followers: 0.02 };
 
-function parseLinks(raw: string): string[] {
-  return raw
-    .split(/\r?\n|,/)
-    .map(l => l.trim())
-    .filter(l => /^https?:\/\/\S+/i.test(l));
+interface ParsedLine {
+  link: string;
+  comments: string[];
+}
+
+function parseMassOrderInput(raw: string): ParsedLine[] {
+  const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const result: ParsedLine[] = [];
+
+  for (const line of lines) {
+    let link = '';
+    let commentText = '';
+
+    if (line.includes('|')) {
+      const parts = line.split('|');
+      link = parts[0].trim();
+      commentText = parts.slice(1).join('|').trim();
+    } else if (line.includes(',')) {
+      const commaIdx = line.indexOf(',');
+      const possibleLink = line.slice(0, commaIdx).trim();
+      if (/^https?:\/\/\S+/i.test(possibleLink)) {
+        link = possibleLink;
+        commentText = line.slice(commaIdx + 1).trim();
+      } else {
+        link = line.trim();
+      }
+    } else {
+      link = line.trim();
+    }
+
+    if (/^https?:\/\/\S+/i.test(link)) {
+      const comments = commentText
+        ? commentText.split(/[,;\n]/).map(c => c.trim()).filter(Boolean)
+        : [];
+      result.push({ link, comments });
+    }
+  }
+  return result;
 }
 
 function defaultQty(base: number): Record<string, number> {
   const q: Record<string, number> = {};
   ALL_TYPES.forEach(t => { q[t] = Math.round(base * (RATIOS[t] || 0)); });
   return q;
-}
-
-function newRow(link: string, base: number, tf: string, allowedTypes?: string[]): Row {
-  const types: Record<string, boolean> = { ...DEFAULT_TYPES };
-  if (allowedTypes && allowedTypes.length) {
-    ALL_TYPES.forEach(t => { types[t] = false; });
-    allowedTypes.forEach(t => { if (t in types) types[t] = true; });
-  }
-  return {
-    id: crypto.randomUUID(),
-    link,
-    base_quantity: base,
-    timeframe: tf,
-    types,
-    qty: defaultQty(base),
-  };
 }
 
 export default function MassOrder() {
@@ -75,10 +114,11 @@ export default function MassOrder() {
     queryKey: ['mass-order-bundles', user?.id],
     enabled: !!user?.id,
     queryFn: async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('user_bundles')
-        .select('id, name, platform, user_bundle_items(id, engagement_type, price_per_k, user_service_id, user_bundle_item_providers(user_provider_account_id, provider_service_id, priority, enabled))')
+        .select('id, name, platform, user_bundle_items(id, engagement_type, quantity, user_service_id, min_ratio_percent, max_ratio_percent, user_bundle_item_providers(user_provider_account_id, provider_service_id, priority, enabled))')
         .order('created_at', { ascending: false });
+      if (error) throw error;
       return data || [];
     },
   });
@@ -87,13 +127,28 @@ export default function MassOrder() {
     queryKey: ['mass-order-user-services', user?.id],
     enabled: !!user?.id,
     queryFn: async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('user_services')
-        .select('user_provider_account_id, provider_service_id, min_quantity, is_active')
+        .select('id, user_provider_account_id, provider_service_id, rate, min_quantity, is_active')
         .eq('is_active', true);
+      if (error) throw error;
       return data || [];
     },
   });
+
+  const rateForItem = (item: any): number => {
+    const list = userServices as any[];
+    const direct = list.find((s) => s.id === item?.user_service_id);
+    if (direct && Number(direct.rate) > 0) return Number(direct.rate);
+    const mapped = (item?.user_bundle_item_providers || [])
+      .map((m: any) => list.find((s) =>
+        s.user_provider_account_id === m.user_provider_account_id
+        && String(s.provider_service_id) === String(m.provider_service_id)
+      ))
+      .filter((s: any) => s && Number(s.rate) > 0)
+      .map((s: any) => Number(s.rate));
+    return mapped.length ? Math.min(...mapped) : 0;
+  };
 
   const selectedBundle: any = useMemo(
     () => bundles.find((b: any) => b.id === bundleId),
@@ -107,10 +162,10 @@ export default function MassOrder() {
   const priceMap: Record<string, number> = useMemo(() => {
     const m: Record<string, number> = {};
     (selectedBundle?.user_bundle_items || []).forEach((i: any) => {
-      if (i.engagement_type) m[i.engagement_type] = Number(i.price_per_k) || 0;
+      if (i.engagement_type) m[i.engagement_type] = rateForItem(i);
     });
     return m;
-  }, [selectedBundle]);
+  }, [selectedBundle, userServices]);
 
   function recomputeDefaults(base: number) {
     setBaseQty(base);
@@ -131,24 +186,53 @@ export default function MassOrder() {
   const grandTotal = useMemo(() => rows.reduce((s, r) => s + perRowCost(r), 0), [rows]);
 
   function preview() {
-    const links = parseLinks(raw);
-    if (!links.length) return toast.error('No valid links found');
+    const parsed = parseMassOrderInput(raw);
+    if (!parsed.length) return toast.error('No valid links found');
+    if (!bundleId) return toast.error('Please select a bundle first');
+
+    const items = selectedBundle?.user_bundle_items || [];
     const typesToUse = allowedTypes.length ? allowedTypes : ['views'];
-    setRows(links.map(l => {
+
+    setRows(parsed.map(({ link, comments }) => {
       const types: Record<string, boolean> = {};
       ALL_TYPES.forEach(t => { types[t] = false; });
       typesToUse.forEach(t => { types[t] = true; });
-      const qty: Record<string, number> = { ...defaultQty(baseQty), ...defaultsQty };
+
+      const qty: Record<string, number> = {};
+      ALL_TYPES.forEach(t => {
+        if (t === 'views') {
+          qty[t] = baseQty;
+        } else if (t === 'comments' && comments.length > 0) {
+          qty[t] = comments.length;
+          types['comments'] = true;
+        } else {
+          // Compute randomized ratio between min and max percentage
+          const bundleItem = items.find((i: any) => i.engagement_type === t);
+          const min = (bundleItem?.min_ratio_percent != null && Number(bundleItem.min_ratio_percent) > 0)
+            ? Number(bundleItem.min_ratio_percent)
+            : (DEFAULT_RATIOS_MIN[t] ?? 2.1);
+          const max = (bundleItem?.max_ratio_percent != null && Number(bundleItem.max_ratio_percent) > 0)
+            ? Number(bundleItem.max_ratio_percent)
+            : (DEFAULT_RATIOS_MAX[t] ?? 5.0);
+
+          const low = Math.min(min, max);
+          const high = Math.max(min, max);
+          const randomPercent = low + Math.random() * (high - low);
+          qty[t] = Math.max(1, Math.round(baseQty * (randomPercent / 100)));
+        }
+      });
+
       return {
         id: crypto.randomUUID(),
-        link: l,
+        link,
         base_quantity: baseQty,
         timeframe,
         types,
         qty,
+        custom_comments: comments.length > 0 ? comments : undefined,
       };
     }));
-    toast.success(`${links.length} link(s) ready`);
+    toast.success(`${parsed.length} link(s) ready with randomized organic ratios!`);
   }
 
   function onFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -157,8 +241,7 @@ export default function MassOrder() {
     const reader = new FileReader();
     reader.onload = () => {
       const text = String(reader.result || '');
-      const firstCol = text.split(/\r?\n/).map(l => l.split(/[,\t;]/)[0]).join('\n');
-      setRaw(firstCol);
+      setRaw(text);
       toast.success('File loaded');
     };
     reader.readAsText(f);
@@ -182,7 +265,7 @@ export default function MassOrder() {
     items.forEach((i: any) => {
       if (i.engagement_type) serviceMap[i.engagement_type] = {
         service_id: i.service_id ?? null,
-        price: Number(i.price_per_k) || 0,
+        price: rateForItem(i),
       };
     });
 
@@ -233,12 +316,16 @@ export default function MassOrder() {
                 provider_service_id: mapping.provider_service_id,
                 priority: mapping.priority,
               })),
+              custom_comments: (t === 'comments' && r.custom_comments && r.custom_comments.length > 0)
+                ? r.custom_comments.join("\n")
+                : undefined,
               time_limit_hours: hours,
               variance_percent: 15,
               peak_hours_enabled: false,
             };
           })
           .filter((e) => e.quantity > 0);
+
         const coordinatedSchedules = coordinateEngagementSchedules(
           preparedEngagements.map((engagement) => engagement.organicSchedule),
         );
@@ -312,7 +399,7 @@ export default function MassOrder() {
             <div>
               <h1 className="text-2xl font-bold tracking-tight">Mass Order <span className="text-muted-foreground font-normal">— Bulk Engagement</span></h1>
               <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
-                Order multiple links at once. Paste them or upload a CSV/TXT file, customize each link, submit in a batch, and track everything in history.
+                Order multiple links at once. Paste links or links with custom comments, auto-randomize organic ratios per video, and submit in one click.
               </p>
             </div>
           </div>
@@ -337,7 +424,7 @@ export default function MassOrder() {
             ))}
           </select>
           {bundles.length === 0 && (
-            <p className="text-xs text-warning">First create a bundle in <a href="/my-bundles" className="underline">My Bundles</a>.</p>
+            <p className="text-xs text-warning">First create a bundle in My Bundles to use Mass Order.</p>
           )}
 
           <div>
@@ -358,7 +445,7 @@ export default function MassOrder() {
                 onChange={e => recomputeDefaults(Number(e.target.value) || 0)}
               />
               <p className="text-[11px] text-muted-foreground mt-1">
-                Changing this auto-fills other types using standard ratios. You can override each below.
+                Each link will automatically receive random natural engagement quantities calculated from your bundle's Min% and Max% ratios.
               </p>
             </div>
             <div>
@@ -387,53 +474,40 @@ export default function MassOrder() {
               </div>
             </div>
           </div>
-
-          {/* Per-type default quantities from selected bundle */}
-          {allowedTypes.length > 0 && (
-            <div className="pt-2 border-t border-border">
-              <Label>Default Quantity Per Engagement Type</Label>
-              <p className="text-[11px] text-muted-foreground mt-1">
-                Every type in your selected bundle. Set the default quantity applied to each new link.
-              </p>
-              <div className="mt-3 grid sm:grid-cols-2 md:grid-cols-3 gap-2">
-                {allowedTypes.map(t => (
-                  <div key={t} className="flex items-center gap-2 px-3 py-2 rounded-xl border border-border bg-secondary/40">
-                    <span className="capitalize text-sm font-medium min-w-[80px]">{t}</span>
-                    <Input
-                      type="number"
-                      min={0}
-                      className="input-3d h-9 flex-1"
-                      value={defaultsQty[t] ?? 0}
-                      onChange={e => setDefaultsQty({ ...defaultsQty, [t]: Math.max(0, Number(e.target.value) || 0) })}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <p className="text-[11px] text-muted-foreground">Defaults apply only to new links. Edit existing rows to override per-link values.</p>
         </div>
 
         {/* Links input */}
         <div className="glass-card p-6 space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold flex items-center gap-2">🔗 Links</h2>
+            <h2 className="text-lg font-semibold flex items-center gap-2">🔗 Links & Comments</h2>
             <label className="btn-glass px-3 py-2 text-xs cursor-pointer flex items-center gap-2">
               <Upload className="w-3.5 h-3.5" /> Upload CSV / TXT
               <input type="file" accept=".csv,.txt" className="hidden" onChange={onFile} />
             </label>
           </div>
+
+          <div className="rounded-lg bg-primary/5 border border-primary/20 p-3 text-xs text-muted-foreground">
+            <b>Formats Supported:</b><br />
+            • <b>Plain link:</b> <code>https://instagram.com/p/abc</code><br />
+            • <b>Link with Custom Comments:</b> <code>https://instagram.com/p/abc | Great reel, Awesome video, Love this!</code><br />
+            • <b>Comma separated:</b> <code>https://instagram.com/p/abc, Nice post, Beautiful video, Super cool</code>
+          </div>
+
           <Textarea
             rows={7}
             className="input-3d font-mono text-[13px]"
-            placeholder={`One link per line.\nhttps://instagram.com/p/abc\nhttps://instagram.com/p/xyz\n\nOr upload a CSV (first column = link).`}
+            placeholder={`One link per line. Optional custom comments separated by comma:
+https://instagram.com/p/video1
+https://instagram.com/p/video2 | Nice post, Awesome reel, Love this, Wow!
+https://instagram.com/p/video3, Great video, Super cool, Best content`}
             value={raw}
             onChange={e => setRaw(e.target.value)}
           />
           <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>{parseLinks(raw).length} valid link(s)</span>
-            <Button onClick={preview} className="btn-3d h-10 px-5">Preview</Button>
+            <span>{parseMassOrderInput(raw).length} valid link(s)</span>
+            <Button onClick={preview} className="btn-3d h-10 px-5 flex items-center gap-1.5">
+              <Sparkles className="w-4 h-4 text-amber-400" /> Preview with Random Ratios
+            </Button>
           </div>
         </div>
 
@@ -441,7 +515,10 @@ export default function MassOrder() {
         {rows.length > 0 && (
           <div className="glass-card p-6 space-y-4">
             <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">Preview ({rows.length})</h2>
+              <div>
+                <h2 className="text-lg font-semibold">Preview ({rows.length} Links)</h2>
+                <p className="text-xs text-muted-foreground">Each video has randomized organic ratios and custom comments attached.</p>
+              </div>
               <span className="px-3 py-1.5 rounded-lg bg-primary/15 text-primary text-sm font-medium">
                 {rows.length} link(s)
               </span>
@@ -456,6 +533,12 @@ export default function MassOrder() {
                       <div className="min-w-0 flex-1">
                         <p className="lux-mono text-[9px] text-muted-foreground">LINK</p>
                         <p className="text-[12px] font-mono truncate text-foreground">{r.link}</p>
+                        {r.custom_comments && r.custom_comments.length > 0 && (
+                          <div className="mt-1 flex items-center gap-1.5 text-[11px] text-amber-600 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-md w-fit">
+                            <MessageSquare className="w-3 h-3" />
+                            <span>{r.custom_comments.length} Custom Comments</span>
+                          </div>
+                        )}
                       </div>
                       <div className="flex gap-1">
                         <button onClick={() => setEditing(r)} className="text-muted-foreground hover:text-primary p-1"><Pencil className="w-4 h-4" /></button>
@@ -466,7 +549,10 @@ export default function MassOrder() {
                       {activeTypes.map(t => (
                         <span key={t} className="text-foreground">
                           <span className="capitalize text-muted-foreground">{t}:</span>{' '}
-                          <b>{(r.qty[t] ?? Math.round(r.base_quantity * (RATIOS[t] || 0))).toLocaleString()}</b>
+                          <b>{(r.qty[t] ?? 0).toLocaleString()}</b>
+                          {t === 'comments' && r.custom_comments?.length ? (
+                            <span className="ml-1 text-[10px] text-amber-600 font-semibold">(Custom)</span>
+                          ) : null}
                         </span>
                       ))}
                     </div>
@@ -510,69 +596,68 @@ export default function MassOrder() {
                     value={editing.base_quantity}
                     onChange={e => {
                       const b = Number(e.target.value) || 0;
-                      setEditing({ ...editing, base_quantity: b, qty: defaultQty(b) });
+                      setEditing({ ...editing, base_quantity: b });
                     }}
                   />
-                  <p className="text-[10px] text-muted-foreground mt-1">Changing the base will auto-adjust the default quantity for every type.</p>
                 </div>
                 <div>
                   <Label>Timeframe</Label>
                   <select
-                    className="w-full h-10 mt-2 px-3 rounded-xl bg-secondary border border-border text-foreground"
-                    value={isCustom(editing.timeframe) ? CUSTOM : editing.timeframe}
-                    onChange={e => setEditing({ ...editing, timeframe: e.target.value === CUSTOM ? 'Under 1 hours' : e.target.value })}
+                    className="w-full h-10 px-3 mt-2 rounded-xl bg-secondary border border-border"
+                    value={editing.timeframe}
+                    onChange={e => setEditing({ ...editing, timeframe: e.target.value })}
                   >
                     {TIMEFRAMES.map(t => <option key={t}>{t}</option>)}
-                    <option value={CUSTOM}>Custom…</option>
                   </select>
-                  {isCustom(editing.timeframe) && (
-                    <div className="flex items-center gap-2 mt-2">
-                      <Input
-                        type="number"
-                        min={1}
-                        className="input-3d h-10 w-24"
-                        value={parseInt(editing.timeframe.replace(/\D/g, '')) || 1}
-                        onChange={e => setEditing({ ...editing, timeframe: `Under ${Math.max(1, Number(e.target.value) || 1)} hours` })}
-                      />
-                      <span className="text-xs text-muted-foreground">hours</span>
-                    </div>
-                  )}
                 </div>
               </div>
+
+              {/* Custom comments textarea in edit modal */}
               <div>
-                <Label>Engagement Types & Quantities</Label>
-                <p className="text-[11px] text-muted-foreground mt-1">Set a separate quantity for each type. Only enabled types will be submitted.</p>
-                <div className="mt-2 space-y-2">
-                  {(allowedTypes.length ? allowedTypes : ALL_TYPES).map(t => {
-                    const on = !!editing.types[t];
-                    const q = editing.qty[t] ?? Math.round(editing.base_quantity * (RATIOS[t] || 0));
-                    return (
-                      <div key={t} className="flex items-center gap-3 px-3 py-2 rounded-xl border border-border bg-secondary/40">
-                        <label className="flex items-center gap-2 min-w-[110px] cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={on}
-                            onChange={e => setEditing({ ...editing, types: { ...editing.types, [t]: e.target.checked } })}
-                          />
-                          <span className="capitalize text-sm font-medium">{t}</span>
-                        </label>
-                        <Input
-                          type="number"
-                          min={0}
-                          disabled={!on}
-                          className="input-3d h-9 flex-1"
-                          value={q}
-                          onChange={e => setEditing({ ...editing, qty: { ...editing.qty, [t]: Math.max(0, Number(e.target.value) || 0) } })}
-                        />
-                      </div>
-                    );
-                  })}
+                <Label>Custom Comments (one per line or comma-separated)</Label>
+                <Textarea
+                  rows={3}
+                  className="input-3d font-mono text-xs mt-2"
+                  placeholder="Comment 1, Comment 2, Comment 3"
+                  value={editing.custom_comments ? editing.custom_comments.join(", ") : ""}
+                  onChange={e => {
+                    const comments = e.target.value.split(/[,;\n]/).map(c => c.trim()).filter(Boolean);
+                    setEditing({
+                      ...editing,
+                      custom_comments: comments.length > 0 ? comments : undefined,
+                      qty: { ...editing.qty, comments: comments.length > 0 ? comments.length : (editing.qty.comments || 1) },
+                      types: { ...editing.types, comments: comments.length > 0 ? true : editing.types.comments }
+                    });
+                  }}
+                />
+              </div>
+
+              <div>
+                <Label>Quantities</Label>
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  {allowedTypes.map(t => (
+                    <div key={t} className="flex items-center gap-2 p-2 border rounded-lg bg-secondary/30">
+                      <input
+                        type="checkbox"
+                        checked={!!editing.types[t]}
+                        onChange={e => setEditing({ ...editing, types: { ...editing.types, [t]: e.target.checked } })}
+                      />
+                      <span className="capitalize text-xs font-medium flex-1">{t}</span>
+                      <Input
+                        type="number"
+                        min={0}
+                        className="h-8 w-20 text-xs text-right"
+                        value={editing.qty[t] ?? 0}
+                        onChange={e => setEditing({ ...editing, qty: { ...editing.qty, [t]: Number(e.target.value) || 0 } })}
+                      />
+                    </div>
+                  ))}
                 </div>
               </div>
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setEditing(null)}>Cancel</Button>
-              <Button className="btn-3d" onClick={() => saveEdit(editing)}>Save</Button>
+              <Button onClick={() => saveEdit(editing)}>Save</Button>
             </DialogFooter>
           </DialogContent>
         )}

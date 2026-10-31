@@ -30,6 +30,7 @@ const engagementSchema = z.object({
   user_bundle_item_id: z.string().uuid().nullable().optional(),
   provider_mappings: z.array(providerMappingSchema).min(1),
   scheduled_runs: z.array(scheduledRunSchema).optional(),
+  custom_comments: z.string().nullable().optional(),
 });
 
 const orderSchema = z.object({
@@ -195,12 +196,13 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       const itemResult = await client.query(
         `INSERT INTO lovable_legacy.engagement_order_items
            (engagement_order_id,engagement_type,user_service_id,user_provider_account_id,
-            user_bundle_item_id,provider_mappings,quantity,price,status)
-         VALUES ($1::uuid,$2,$3::uuid,$4::uuid,$5::uuid,$6::jsonb,$7,$8,'pending')
+            user_bundle_item_id,provider_mappings,quantity,price,status,custom_comments)
+         VALUES ($1::uuid,$2,$3::uuid,$4::uuid,$5::uuid,$6::jsonb,$7,$8,'pending',$9)
          RETURNING id`,
         [
           order.id, item.engagement.type, item.userServiceId, item.providerAccountId,
           item.bundleItemId, JSON.stringify(item.mappings), item.engagement.quantity, item.price,
+          item.engagement.custom_comments ?? null,
         ],
       );
       const itemId = itemResult.rows[0].id;
@@ -210,12 +212,13 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
         await client.query(
           `INSERT INTO lovable_legacy.organic_run_schedule
              (order_id,engagement_order_item_id,run_number,scheduled_at,quantity_to_send,
-              base_quantity,variance_applied,peak_multiplier,status)
-           VALUES ($1::uuid,$2::uuid,$3,$4::timestamptz,$5,$6,$7,$8,'pending')`,
+              base_quantity,variance_applied,peak_multiplier,status,custom_comments)
+           VALUES ($1::uuid,$2::uuid,$3,$4::timestamptz,$5,$6,$7,$8,'pending',$9)`,
           [
             order.id, itemId, index + 1, run.scheduled_at, run.quantity_to_send,
             run.base_quantity ?? run.quantity_to_send, run.variance_applied ?? 0,
             run.peak_multiplier ?? 1,
+            item.engagement.custom_comments ?? null,
           ],
         );
       }

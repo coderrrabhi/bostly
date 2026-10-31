@@ -7,9 +7,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { toast } from 'sonner';
-import { Package, Plus, Trash2, Globe, Eye, Heart, MessageCircle, Bookmark, Share2, Repeat2, UserPlus } from 'lucide-react';
+import { Package, Plus, Trash2, Eye, Heart, MessageCircle, Bookmark, Share2, Repeat2, UserPlus, Sliders } from 'lucide-react';
 import { SubscriptionGuard } from '@/components/subscription/SubscriptionGuard';
 
 const ENGAGEMENT_TYPES = [
@@ -21,6 +21,25 @@ const ENGAGEMENT_TYPES = [
   { key: 'reposts', label: 'Reposts', icon: Repeat2 },
   { key: 'followers', label: 'Followers', icon: UserPlus },
 ];
+
+const DEFAULT_RATIOS_MIN: Record<string, string> = {
+  likes: '2.1',
+  shares: '0.1',
+  saves: '0.2',
+  comments: '0.03',
+  reposts: '0.03',
+  followers: '1.0',
+};
+
+const DEFAULT_RATIOS_MAX: Record<string, string> = {
+  likes: '5.0',
+  shares: '0.5',
+  saves: '0.6',
+  comments: '0.2',
+  reposts: '0.25',
+  followers: '3.0',
+};
+
 const EMPTY_ROWS: any[] = [];
 
 export default function MyBundles() {
@@ -30,7 +49,6 @@ export default function MyBundles() {
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
   const [platform, setPlatform] = useState('instagram');
-  const [expandedItem, setExpandedItem] = useState<string | null>(null);
 
   const { data: bundles = [], error: bundlesError } = useQuery({
     queryKey: ['user-bundles', user?.id],
@@ -55,7 +73,6 @@ export default function MyBundles() {
       toast.error(msg === 'Failed to fetch' ? 'Network issue loading bundles — please retry' : msg);
     }
   }, [bundlesError]);
-
 
   const { data: accountRows } = useQuery({
     queryKey: ['user-provider-accounts-min', user?.id],
@@ -95,6 +112,7 @@ export default function MyBundles() {
       toast.error(e?.message === 'Failed to fetch' ? 'Network issue — please retry' : (e?.message || 'Failed to create bundle'));
     }
   }
+
   async function deleteBundle(id: string) {
     if (!confirm('Delete this bundle?')) return;
     try {
@@ -107,13 +125,21 @@ export default function MyBundles() {
       toast.error(e?.message === 'Failed to fetch' ? 'Network issue — please retry' : (e?.message || 'Failed'));
     }
   }
+
   async function addEngagementItem(bundleId: string, engagementType: string) {
     const exists = bundles.find((b: any) => b.id === bundleId)?.user_bundle_items?.some((i: any) => i.engagement_type === engagementType);
     if (exists) return toast.error(`${engagementType} already added`);
     if (!user?.id) return toast.error('Not signed in');
     try {
+      const defaultMin = DEFAULT_RATIOS_MIN[engagementType] ? Number(DEFAULT_RATIOS_MIN[engagementType]) : null;
+      const defaultMax = DEFAULT_RATIOS_MAX[engagementType] ? Number(DEFAULT_RATIOS_MAX[engagementType]) : null;
       const { error } = await supabase.from('user_bundle_items').insert({
-        user_id: user.id, user_bundle_id: bundleId, engagement_type: engagementType, quantity: 100,
+        user_id: user.id,
+        user_bundle_id: bundleId,
+        engagement_type: engagementType,
+        quantity: 100,
+        min_ratio_percent: defaultMin,
+        max_ratio_percent: defaultMax,
       });
       if (error) {
         console.error('[addEngagementItem]', error);
@@ -125,6 +151,7 @@ export default function MyBundles() {
       toast.error(e?.message === 'Failed to fetch' ? 'Network issue — please retry' : (e?.message || 'Failed'));
     }
   }
+
   async function deleteItem(id: string) {
     try {
       const { error } = await supabase.from('user_bundle_items').delete().eq('id', id);
@@ -135,15 +162,6 @@ export default function MyBundles() {
       toast.error(e?.message === 'Failed to fetch' ? 'Network issue — please retry' : (e?.message || 'Failed'));
     }
   }
-  async function updateQuantity(id: string, quantity: number) {
-    try {
-      await supabase.from('user_bundle_items').update({ quantity }).eq('id', id);
-      await qc.invalidateQueries({ queryKey: ['user-bundles'] });
-    } catch (e: any) {
-      console.error('[updateQuantity]', e);
-    }
-  }
-
 
   return (
     <DashboardLayout>
@@ -153,7 +171,7 @@ export default function MyBundles() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-2xl font-bold flex items-center gap-2"><Package className="w-6 h-6 text-primary" /> My Bundles</h1>
-              <p className="text-sm text-muted-foreground mt-1">Create bundles and map each engagement type to your provider accounts with priority-based rotation.</p>
+              <p className="text-sm text-muted-foreground mt-1">Create bundles, set natural engagement ratios (Min% – Max%), and map provider accounts with rotation.</p>
             </div>
             <Button onClick={() => setCreateOpen(true)}><Plus className="w-4 h-4 mr-1" /> New Bundle</Button>
           </div>
@@ -172,7 +190,7 @@ export default function MyBundles() {
                 <div key={b.id} className="rounded-xl border bg-card p-4">
                   <div className="flex items-start justify-between">
                     <div>
-                      <p className="font-semibold">{b.name} <span className="text-xs text-muted-foreground">· {b.platform}</span></p>
+                      <p className="font-semibold">{b.name} <span className="text-xs text-muted-foreground">• {b.platform}</span></p>
                       <p className="text-xs text-muted-foreground">{b.description || 'No description'}</p>
                     </div>
                     <Button size="sm" variant="ghost" className="text-destructive" onClick={() => deleteBundle(b.id)}><Trash2 className="w-3.5 h-3.5" /></Button>
@@ -199,12 +217,12 @@ export default function MyBundles() {
                   </div>
 
                   {/* Items */}
-                  <div className="mt-4 space-y-2">
+                  <div className="mt-4 space-y-3">
                     {items.map((it: any) => {
                       const meta = ENGAGEMENT_TYPES.find((e) => e.key === it.engagement_type);
                       const Icon = meta?.icon || Eye;
                       const mappedCount = (it.user_bundle_item_providers || []).filter((p: any) => p.enabled).length;
-                      const isOpen = expandedItem === it.id;
+                      const isBase = it.engagement_type === 'views';
                       return (
                         <div key={it.id} className="rounded-lg border bg-muted/30">
                           <div className="p-3 flex items-center justify-between gap-3 flex-wrap">
@@ -213,7 +231,21 @@ export default function MyBundles() {
                                 <Icon className="w-4 h-4 text-primary" />
                               </div>
                               <div>
-                                <div className="font-medium capitalize text-sm">{it.engagement_type}</div>
+                                <div className="font-medium capitalize text-sm flex items-center gap-2">
+                                  <span>{it.engagement_type}</span>
+                                  {!isBase && (
+                                    <span className="text-[10px] font-semibold text-primary bg-primary/10 border border-primary/20 px-2 py-0.5 rounded-full">
+                                      {it.min_ratio_percent != null && it.max_ratio_percent != null
+                                        ? `${it.min_ratio_percent}% - ${it.max_ratio_percent}% ratio`
+                                        : `${DEFAULT_RATIOS_MIN[it.engagement_type] || 2.1}% - ${DEFAULT_RATIOS_MAX[it.engagement_type] || 5.0}% (Default ratio)`}
+                                    </span>
+                                  )}
+                                  {isBase && (
+                                    <span className="text-[10px] font-semibold text-muted-foreground bg-muted border px-2 py-0.5 rounded-full">
+                                      Base (100% Views)
+                                    </span>
+                                  )}
+                                </div>
                                 <div className="text-[11px] text-muted-foreground">{mappedCount} provider{mappedCount !== 1 ? 's' : ''} mapped</div>
                               </div>
                             </div>
@@ -223,6 +255,7 @@ export default function MyBundles() {
                           </div>
                           <div className="border-t bg-background/60 p-3">
                             <ProvidersPanel
+                              item={it}
                               itemId={it.id}
                               itemLabel={`${b.platform} ${it.engagement_type}`}
                               accounts={accounts as any[]}
@@ -265,9 +298,20 @@ export default function MyBundles() {
 }
 
 function ProvidersPanel({
-  itemId, itemLabel, accounts, onChanged,
-}: { itemId: string; itemLabel: string; accounts: any[]; onChanged?: () => void }) {
+  item, itemId, itemLabel, accounts, onChanged,
+}: { item: any; itemId: string; itemLabel: string; accounts: any[]; onChanged?: () => void }) {
   const qc = useQueryClient();
+  const isBase = item?.engagement_type === 'views';
+  const defaultMin = DEFAULT_RATIOS_MIN[item?.engagement_type] ?? '2.1';
+  const defaultMax = DEFAULT_RATIOS_MAX[item?.engagement_type] ?? '5.0';
+
+  const [minRatio, setMinRatio] = useState<string>(
+    item?.min_ratio_percent != null ? String(item.min_ratio_percent) : defaultMin
+  );
+  const [maxRatio, setMaxRatio] = useState<string>(
+    item?.max_ratio_percent != null ? String(item.max_ratio_percent) : defaultMax
+  );
+
   const { data: mappingRows } = useQuery({
     queryKey: ['ubi-providers', itemId],
     enabled: !!itemId,
@@ -307,6 +351,25 @@ function ProvidersPanel({
   async function handleSave() {
     setSaving(true);
     try {
+      // 1. Save min and max ratio if not base
+      let ratioChanged = false;
+      if (!isBase) {
+        const minVal = minRatio.trim() !== '' ? Number(minRatio) : null;
+        const maxVal = maxRatio.trim() !== '' ? Number(maxRatio) : null;
+        if (minVal !== item?.min_ratio_percent || maxVal !== item?.max_ratio_percent) {
+          const { error: rErr } = await supabase
+            .from('user_bundle_items')
+            .update({ min_ratio_percent: minVal, max_ratio_percent: maxVal })
+            .eq('id', itemId);
+          if (rErr) {
+            console.error('[save ratio error]', rErr);
+            toast.error(rErr.message || 'Failed to update ratio');
+          } else {
+            ratioChanged = true;
+          }
+        }
+      }
+
       const changed: { accountId: string; draft: Draft; existing: any }[] = [];
       for (const a of accounts) {
         const d = drafts[a.id];
@@ -319,7 +382,7 @@ function ProvidersPanel({
         if (!same) changed.push({ accountId: a.id, draft: d, existing: m });
       }
 
-      if (changed.length === 0) {
+      if (changed.length === 0 && !ratioChanged) {
         toast.info('No changes to save');
         return;
       }
@@ -338,9 +401,7 @@ function ProvidersPanel({
         seen.set(p, ep.name);
       }
 
-
-      // Validate all non-empty service IDs locally. The mapping belongs to the
-      // stable provider account and survives API-key rotation or downtime.
+      // Validate all non-empty service IDs locally
       for (const c of changed) {
         const sid = c.draft.provider_service_id.trim();
         if (!sid) continue;
@@ -350,28 +411,37 @@ function ProvidersPanel({
         }
       }
 
-      const { data, error } = await supabase.functions.invoke('user-provider-manage', {
-        body: {
-          op: 'save_bundle_mappings',
-          item_id: itemId,
-          mappings: accounts.map((account) => {
-            const draft = drafts[account.id];
-            const serviceId = draft?.provider_service_id.trim() || '';
-            return {
-              account_id: account.id,
-              enabled: !!draft?.enabled,
-              service_id: serviceId || null,
-              priority: draft?.priority ?? 1,
-            };
-          }),
-        },
-      });
-      if (error || !data?.ok) {
-        toast.error(error?.message || data?.error || 'Failed to save bundle mappings');
-        return;
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      if (!authUser) { toast.error('Not signed in'); return; }
+
+      if (changed.length > 0) {
+        // Park existing priorities to avoid unique-priority clashes while reordering
+        for (const m of mappings) {
+          const { error: e } = await supabase.from('user_bundle_item_providers')
+            .update({ priority: -(1000000 + Math.abs(m.priority || 0)) - Math.floor(Math.random() * 1000) })
+            .eq('id', m.id);
+          if (e) { toast.error(e.message); return; }
+        }
+        for (const account of accounts) {
+          const draft = drafts[account.id];
+          const serviceId = draft?.provider_service_id.trim() || null;
+          const payload = { enabled: !!draft?.enabled, provider_service_id: serviceId, priority: draft?.priority ?? 1 };
+          const existing = byAccount[account.id];
+          const { error: e } = existing
+            ? await supabase.from('user_bundle_item_providers').update(payload).eq('id', existing.id)
+            : await supabase.from('user_bundle_item_providers').insert({
+                ...payload, user_id: authUser.id, user_bundle_item_id: itemId, user_provider_account_id: account.id,
+              });
+          if (e) {
+            toast.error(e.message?.includes('SUBSCRIPTION') ? 'Active subscription required' : e.message);
+            return;
+          }
+        }
       }
-      toast.success(`Saved ${changed.length} change${changed.length > 1 ? 's' : ''}`);
+
+      toast.success('Changes saved successfully');
       await qc.invalidateQueries({ queryKey: ['ubi-providers', itemId] });
+      await qc.invalidateQueries({ queryKey: ['user-bundles'] });
       onChanged?.();
     } finally {
       setSaving(false);
@@ -380,6 +450,52 @@ function ProvidersPanel({
 
   return (
     <div className="space-y-3">
+      {/* Ratio Setup for non-views engagement items */}
+      {!isBase && (
+        <div className="bg-primary/5 border border-primary/20 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <div className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+              <Sliders className="w-3.5 h-3.5 text-primary" />
+              <span>Engagement Ratio to Views (% of Views)</span>
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              Views is 100% base. When running Mass Orders across multiple videos, each video gets a <b>natural random percentage</b> between Min% and Max%.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 self-start sm:self-auto shrink-0">
+            <div className="flex items-center gap-1 bg-background border-2 border-border focus-within:border-primary rounded-lg px-2.5 py-1 shadow-sm">
+              <span className="text-[11px] font-medium text-muted-foreground">Min</span>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                max="100"
+                value={minRatio}
+                onChange={(e) => setMinRatio(e.target.value)}
+                placeholder="Min %"
+                className="w-16 h-7 text-xs font-mono font-bold bg-transparent border-0 focus:outline-none text-right"
+              />
+              <span className="text-xs font-semibold text-muted-foreground">%</span>
+            </div>
+            <span className="text-muted-foreground font-bold">—</span>
+            <div className="flex items-center gap-1 bg-background border-2 border-border focus-within:border-primary rounded-lg px-2.5 py-1 shadow-sm">
+              <span className="text-[11px] font-medium text-muted-foreground">Max</span>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                max="100"
+                value={maxRatio}
+                onChange={(e) => setMaxRatio(e.target.value)}
+                placeholder="Max %"
+                className="w-16 h-7 text-xs font-mono font-bold bg-transparent border-0 focus:outline-none text-right"
+              />
+              <span className="text-xs font-semibold text-muted-foreground">%</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="text-xs text-muted-foreground">Which provider accounts can fulfill "{itemLabel}"</div>
       <div className="rounded-lg border overflow-hidden bg-card">
         <div className="hidden sm:grid grid-cols-[56px_1.2fr_1.4fr_90px] text-xs font-semibold px-3 sm:px-4 py-2 bg-muted/50 border-b gap-2">
@@ -434,7 +550,6 @@ function ProvidersPanel({
                     onChange={(e) => updateDraft(a.id, { priority: Math.max(1, Number(e.target.value) || 1) })}
                     className="h-9 w-20 sm:ml-auto text-right"
                   />
-
                 </div>
               </div>
             );
@@ -446,14 +561,13 @@ function ProvidersPanel({
         <b className="text-foreground">Priority Order:</b> Lower number = tried first (1 = highest priority).<br />
         If account #1 has an active order on the same link, system tries #2, then #3, and so on.
       </div>
-      {accounts.length > 0 && (
+      {(accounts.length > 0 || !isBase) && (
         <div className="flex justify-end">
           <Button onClick={handleSave} disabled={saving} className="min-w-32">
-            {saving ? 'Saving…' : 'Save Changes'}
+            {saving ? 'Saving...' : 'Save Changes'}
           </Button>
         </div>
       )}
     </div>
   );
 }
-

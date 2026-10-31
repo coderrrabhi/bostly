@@ -246,6 +246,9 @@ async function dispatch(run: any): Promise<void> {
         link: run.link,
         quantity: String(run.quantity_to_send),
       });
+      if (run.custom_comments && typeof run.custom_comments === "string" && run.custom_comments.trim()) {
+        params.set("comments", run.custom_comments.trim());
+      }
       response = await fetch(safePanelUrl(account.api_url), {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "BoostlyPro/1.0 (+api)" },

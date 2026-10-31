@@ -8,7 +8,7 @@ const router: IRouter = Router(); router.use(requireAuth);
 const schema = z.object({ table: z.enum(["user_provider_accounts", "user_services", "user_bundles", "user_bundle_items", "user_bundle_item_providers", "subscriptions", "subscription_requests", "engagement_orders", "engagement_order_items", "organic_run_schedule"]), action: z.enum(["insert", "update", "delete", "upsert"]), values: z.any().optional(), filters: z.array(z.object({ operator: z.enum(["eq", "neq", "in", "is", "notIn", "lt"]).optional(), column: z.string(), value: z.any() })).default([]) });
 const columns: Record<string, string[]> = {
   user_provider_accounts: [], user_services: ["name", "category", "type", "rate", "min_quantity", "max_quantity", "refill", "cancel_allowed", "is_active"],
-  user_bundles: ["name", "description", "platform"], user_bundle_items: ["engagement_type", "quantity"],
+  user_bundles: ["name", "description", "platform"], user_bundle_items: ["engagement_type", "quantity", "min_ratio_percent", "max_ratio_percent"],
   user_bundle_item_providers: ["enabled", "provider_service_id", "priority"],
 };
 function user(req: AuthenticatedRequest): Promise<string> {
@@ -283,7 +283,7 @@ router.post("/legacy/mutate", async (req, res): Promise<void> => {
       if (table === "user_bundle_items") {
         const bundle = typeof values.user_bundle_id === "string" ? values.user_bundle_id : "";
         if (!bundle || !(await owns(pool, "user_bundles", bundle, uid)) || !data.engagement_type) throw new Error("A valid bundle and engagement type are required.");
-        const r = await pool.query("INSERT INTO lovable_legacy.user_bundle_items (user_id,user_bundle_id,engagement_type,quantity) VALUES ($1::uuid,$2::uuid,$3,$4) RETURNING *", [uid,bundle,data.engagement_type,data.quantity ?? 100]); res.status(201).json({ data:r.rows,error:null }); return;
+        const r = await pool.query("INSERT INTO lovable_legacy.user_bundle_items (user_id,user_bundle_id,engagement_type,quantity,min_ratio_percent,max_ratio_percent) VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6) RETURNING *", [uid,bundle,data.engagement_type,data.quantity ?? 100, data.min_ratio_percent ?? null, data.max_ratio_percent ?? null]); res.status(201).json({ data:r.rows,error:null }); return;
       }
       if (table === "user_bundle_item_providers") {
         const item = typeof values.user_bundle_item_id === "string" ? values.user_bundle_item_id : ""; const account = typeof values.user_provider_account_id === "string" ? values.user_provider_account_id : "";
