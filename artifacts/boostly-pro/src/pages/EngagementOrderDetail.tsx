@@ -50,6 +50,7 @@ import { TypeHistoryCard } from "@/components/engagement/TypeHistoryCard";
 import { PerTypeBreakdown } from "@/components/engagement/PerTypeBreakdown";
 import { EditRunDialog } from "@/components/engagement/EditRunDialog";
 import { OrderProgressChart } from "@/components/engagement/OrderProgressChart";
+import { RefillOrderDialog } from "@/components/engagement/RefillOrderDialog";
 
 const ENGAGEMENT_ICONS = {
   views: { icon: Eye, label: "Views" },
@@ -104,6 +105,7 @@ export default function EngagementOrderDetail() {
   
   // Edit modal state
   const [editingRun, setEditingRun] = useState<EditRunData | null>(null);
+  const [refillOpen, setRefillOpen] = useState(false);
 
   // Dynamic refetch interval - balanced for performance
   const [refetchInterval, setRefetchInterval] = useState<number | false>(30000);
@@ -758,6 +760,16 @@ export default function EngagementOrderDetail() {
               <RefreshCw className="h-4 w-4 mr-2" />
               Refresh
             </Button>
+            <Button size="sm" onClick={() => setRefillOpen(true)}>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Refill (same curve)
+            </Button>
+            <RefillOrderDialog
+              orderId={order.id}
+              open={refillOpen}
+              onOpenChange={setRefillOpen}
+              onDone={(n) => { if (n) navigate(`/engagement-orders/${n}`); }}
+            />
 
             {/* Admin Controls */}
             {isAdmin && order.status !== 'cancelled' && order.status !== 'completed' && (

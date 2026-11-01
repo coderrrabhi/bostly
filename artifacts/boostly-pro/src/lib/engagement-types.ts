@@ -124,7 +124,7 @@ export interface EngagementConfig {
 // Default organic settings for each type
 export const DEFAULT_ORGANIC_SETTINGS = {
   timeLimitHours: 0,        // Auto mode
-  variancePercent: 25,      // 25% variance
+  variancePercent: 50,      // 50%+ variance (low detection risk)
   peakHoursEnabled: false,  // Peak hours OFF by default
 };
 

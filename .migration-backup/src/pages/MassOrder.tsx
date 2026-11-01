@@ -9,7 +9,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Rocket, Upload, Package, Pencil, Trash2, Loader2, MessageSquare, Sparkles } from 'lucide-react';
+import { Rocket, Upload, Package, Pencil, Trash2, Loader2, MessageSquare, Sparkles, Shuffle, Flame, ShieldCheck } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
+import { CurveSparkline } from '@/components/engagement/CurveSparkline';
+import { MIN_VARIANCE_PERCENT, applyCurveStyle, curveStyleFor, normalizeRunTotals, newCurveSeed, qtyFromPercent, randomRatioPercent, randomViewsInRange, withSeed } from '@/lib/organic-extras';
 import { toast } from 'sonner';
 import { NoBundleBanner } from '@/components/NoBundleBanner';
 import { coordinateEngagementSchedules, generateOrganicSchedule } from '@/lib/organic-algorithm';
@@ -22,6 +25,18 @@ interface Row {
   types: Record<string, boolean>;
   qty: Record<string, number>; // per-type quantity (custom override or randomized)
   custom_comments?: string[]; // comments if provided for this link
+  pct: Record<string, number>; // random ratio % per type (kept when views are edited)
+  seed: number; // unique delivery curve per reel
+  runs: Record<string, ScheduledRun[]>; // preview schedule (submitted as-is)
+  builtAt: number; // when the preview schedule was generated
+}
+
+interface ScheduledRun {
+  scheduled_at: string;
+  quantity_to_send: number;
+  base_quantity: number;
+  variance_applied: number;
+  peak_multiplier: number;
 }
 
 const ALL_TYPES = ['views', 'likes', 'shares', 'reposts', 'comments', 'saves', 'followers'] as const;
@@ -101,8 +116,11 @@ function defaultQty(base: number): Record<string, number> {
 export default function MassOrder() {
   const { user } = useAuth();
   const [raw, setRaw] = useState('');
-  const [baseQty, setBaseQty] = useState(1000);
-  const [defaultsQty, setDefaultsQty] = useState<Record<string, number>>(() => defaultQty(1000));
+  const [baseQty, setBaseQty] = useState(5000);
+  const [baseQtyMax, setBaseQtyMax] = useState(10000);
+  const [defaultsQty, setDefaultsQty] = useState<Record<string, number>>(() => defaultQty(5000));
+  const [peakUS, setPeakUS] = useState(false);
+  const [variance, setVariance] = useState(MIN_VARIANCE_PERCENT);
   const [timeframe, setTimeframe] = useState('Under 24 hours');
   const [campaign, setCampaign] = useState('');
   const [bundleId, setBundleId] = useState('');
@@ -185,54 +203,109 @@ export default function MassOrder() {
   };
   const grandTotal = useMemo(() => rows.reduce((s, r) => s + perRowCost(r), 0), [rows]);
 
+  const providerMinFor = (t: string): number | undefined => {
+    const bundleItem = (selectedBundle?.user_bundle_items || []).find((item: any) => item.engagement_type === t);
+    const mins = (bundleItem?.user_bundle_item_providers || [])
+      .filter((mapping: any) => mapping.enabled && mapping.provider_service_id)
+      .map((mapping: any) => {
+        const service = (userServices as any[]).find((candidate: any) =>
+          candidate.user_provider_account_id === mapping.user_provider_account_id
+          && String(candidate.provider_service_id) === String(mapping.provider_service_id)
+        );
+        return Number(service?.min_quantity) || 0;
+      })
+      .filter((minimum: number) => minimum > 0);
+    return mins.length ? Math.min(...mins) : undefined;
+  };
+
+  // Build each reel's own delivery curve from its seed (same seed = same curve).
+  function buildRuns(types: Record<string, boolean>, qty: Record<string, number>, tf: string, seed: number): { runs: Record<string, ScheduledRun[]>; builtAt: number } {
+    const hours = timeframeToHours(tf);
+    const builtAt = Date.now();
+    const start = new Date(builtAt + 5 * 60_000);
+    const active = Object.keys(types).filter((t) => types[t] && (qty[t] ?? 0) > 0);
+    const schedules = withSeed(seed, () => coordinateEngagementSchedules(
+      active.map((t) => generateOrganicSchedule(t, qty[t], variance, peakUS, start, providerMinFor(t), hours)),
+      Object.fromEntries(active.map((t) => [t, providerMinFor(t)])),
+    ));
+    const runs: Record<string, ScheduledRun[]> = {};
+    schedules.forEach((schedule) => {
+      runs[schedule.engagementType] = schedule.runs.map((run) => ({
+        scheduled_at: run.scheduledAt.toISOString(),
+        quantity_to_send: run.quantity,
+        base_quantity: run.baseQuantity,
+        variance_applied: run.varianceApplied,
+        peak_multiplier: run.peakMultiplier,
+      }));
+    });
+    // Give this reel its own curve shape (fast start, slow burn, viral middle…).
+    const styled = applyCurveStyle(runs, start.getTime(), curveStyleFor(seed));
+    Object.keys(styled).forEach((t) => { runs[t] = styled[t]; });
+    // Clean up: drop zero/negative runs and keep the exact total (respecting provider minimum).
+    Object.keys(runs).forEach((t) => {
+      runs[t] = normalizeRunTotals(runs[t], qty[t] ?? 0, providerMinFor(t) ?? 1);
+    });
+    return { runs, builtAt };
+  }
+
+  // Views → every other engagement keeps its own random % of views.
+  function quantitiesFor(views: number, pct: Record<string, number>, comments?: string[]): Record<string, number> {
+    const qty: Record<string, number> = {};
+    ALL_TYPES.forEach((t) => {
+      if (t === 'views') qty[t] = views;
+      else if (t === 'comments' && comments && comments.length > 0) qty[t] = comments.length;
+      else qty[t] = qtyFromPercent(views, pct[t] ?? 0);
+    });
+    return qty;
+  }
+
+  function rebuildRow(r: Row, seed = r.seed): Row {
+    const { runs, builtAt } = buildRuns(r.types, r.qty, r.timeframe, seed);
+    return { ...r, seed, runs, builtAt };
+  }
+
   function preview() {
     const parsed = parseMassOrderInput(raw);
     if (!parsed.length) return toast.error('No valid links found');
     if (!bundleId) return toast.error('Please select a bundle first');
+    const lo = Math.max(1, Math.min(baseQty, baseQtyMax || baseQty));
+    const hi = Math.max(baseQty, baseQtyMax || baseQty);
 
     const items = selectedBundle?.user_bundle_items || [];
     const typesToUse = allowedTypes.length ? allowedTypes : ['views'];
+    const usedViews = new Set<number>();
 
     setRows(parsed.map(({ link, comments }) => {
       const types: Record<string, boolean> = {};
       ALL_TYPES.forEach(t => { types[t] = false; });
       typesToUse.forEach(t => { types[t] = true; });
+      if (comments.length > 0) types['comments'] = true;
 
-      const qty: Record<string, number> = {};
-      ALL_TYPES.forEach(t => {
-        if (t === 'views') {
-          qty[t] = baseQty;
-        } else if (t === 'comments' && comments.length > 0) {
-          qty[t] = comments.length;
-          types['comments'] = true;
-        } else {
-          // Compute randomized ratio between min and max percentage
-          const bundleItem = items.find((i: any) => i.engagement_type === t);
-          const min = (bundleItem?.min_ratio_percent != null && Number(bundleItem.min_ratio_percent) > 0)
-            ? Number(bundleItem.min_ratio_percent)
-            : (DEFAULT_RATIOS_MIN[t] ?? 2.1);
-          const max = (bundleItem?.max_ratio_percent != null && Number(bundleItem.max_ratio_percent) > 0)
-            ? Number(bundleItem.max_ratio_percent)
-            : (DEFAULT_RATIOS_MAX[t] ?? 5.0);
-
-          const low = Math.min(min, max);
-          const high = Math.max(min, max);
-          const randomPercent = low + Math.random() * (high - low);
-          qty[t] = Math.max(1, Math.round(baseQty * (randomPercent / 100)));
-        }
+      const views = lo === hi ? lo : randomViewsInRange(lo, hi, usedViews);
+      const pct: Record<string, number> = {};
+      ALL_TYPES.forEach((t) => {
+        const bundleItem = items.find((i: any) => i.engagement_type === t);
+        pct[t] = randomRatioPercent(t, bundleItem);
       });
+      const qty = quantitiesFor(views, pct, comments);
+      const seed = newCurveSeed();
+      const { runs, builtAt } = buildRuns(types, qty, timeframe, seed);
 
       return {
         id: crypto.randomUUID(),
         link,
-        base_quantity: baseQty,
+        base_quantity: views,
         timeframe,
         types,
         qty,
         custom_comments: comments.length > 0 ? comments : undefined,
+        pct,
+        seed,
+        runs,
+        builtAt,
       };
     }));
-    toast.success(`${parsed.length} link(s) ready with randomized organic ratios!`);
+    toast.success(`${parsed.length} link(s) ready — random views, random ratios and a unique curve per reel!`);
   }
 
   function onFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -248,7 +321,8 @@ export default function MassOrder() {
   }
 
   function saveEdit(r: Row) {
-    setRows(prev => prev.map(x => x.id === r.id ? r : x));
+    const rebuilt = rebuildRow(r);
+    setRows(prev => prev.map(x => x.id === r.id ? rebuilt : x));
     setEditing(null);
   }
 
@@ -275,7 +349,9 @@ export default function MassOrder() {
       let firstError = '';
       for (const r of rows) {
         const hours = timeframeToHours(r.timeframe);
-        const preparedEngagements = Object.keys(r.types)
+        // Shift the previewed curve so the first run still starts ~5 min from now.
+        const shiftMs = Math.max(0, Date.now() - r.builtAt);
+        const engagements = Object.keys(r.types)
           .filter((t) => r.types[t])
           .map((t) => {
             const q = r.qty[t] ?? Math.round(r.base_quantity * (RATIOS[t] || 0));
@@ -283,29 +359,11 @@ export default function MassOrder() {
             const providerMappings = (bundleItem?.user_bundle_item_providers || [])
               .filter((mapping: any) => mapping.enabled && mapping.provider_service_id)
               .sort((a: any, b: any) => (a.priority ?? 999) - (b.priority ?? 999));
-            const mappedMinimums = providerMappings
-              .map((mapping: any) => {
-                const service = (userServices as any[]).find((candidate: any) =>
-                  candidate.user_provider_account_id === mapping.user_provider_account_id
-                  && String(candidate.provider_service_id) === String(mapping.provider_service_id)
-                );
-                return Number(service?.min_quantity) || 0;
-              })
-              .filter((minimum: number) => minimum > 0);
-            const providerMinimum = mappedMinimums.length ? Math.min(...mappedMinimums) : undefined;
-            const organicSchedule = generateOrganicSchedule(
-              t,
-              q,
-              15,
-              false,
-              new Date(Date.now() + 5 * 60_000),
-              providerMinimum,
-              hours,
-            );
             const priceK = serviceMap[t]?.price ?? 0;
+            const runs = (r.runs[t] ?? []).filter((run) => run.quantity_to_send > 0);
+            const runsTotal = runs.reduce((sum, run) => sum + run.quantity_to_send, 0);
             return {
               type: t,
-              organicSchedule,
               quantity: q,
               price: (q / 1000) * priceK,
               service_id: serviceMap[t]?.service_id ?? null,
@@ -320,28 +378,14 @@ export default function MassOrder() {
                 ? r.custom_comments.join("\n")
                 : undefined,
               time_limit_hours: hours,
-              variance_percent: 15,
-              peak_hours_enabled: false,
+              variance_percent: variance,
+              peak_hours_enabled: peakUS,
+              scheduled_runs: runsTotal === q
+                ? runs.map((run) => ({ ...run, scheduled_at: new Date(new Date(run.scheduled_at).getTime() + shiftMs).toISOString() }))
+                : undefined,
             };
           })
           .filter((e) => e.quantity > 0);
-
-        const coordinatedSchedules = coordinateEngagementSchedules(
-          preparedEngagements.map((engagement) => engagement.organicSchedule),
-        );
-        const scheduleByType = new Map(
-          coordinatedSchedules.map((schedule) => [schedule.engagementType, schedule]),
-        );
-        const engagements = preparedEngagements.map(({ organicSchedule: _organicSchedule, ...engagement }) => ({
-          ...engagement,
-          scheduled_runs: (scheduleByType.get(engagement.type)?.runs ?? []).map((run) => ({
-            scheduled_at: run.scheduledAt.toISOString(),
-            quantity_to_send: run.quantity,
-            base_quantity: run.baseQuantity,
-            variance_applied: run.varianceApplied,
-            peak_multiplier: run.peakMultiplier,
-          })),
-        }));
 
         if (!engagements.length) { fail++; continue; }
         const missingMapping = engagements.find((engagement) => engagement.provider_mappings.length === 0);
@@ -437,15 +481,28 @@ export default function MassOrder() {
         <div className="glass-card p-6 space-y-4">
           <div className="grid md:grid-cols-2 gap-4">
             <div>
-              <Label>Default Base Quantity (Views)</Label>
-              <Input
-                type="number"
-                className="input-3d mt-2 h-12"
-                value={baseQty}
-                onChange={e => recomputeDefaults(Number(e.target.value) || 0)}
-              />
+              <Label>Default Base Quantity (Views) — Random Range</Label>
+              <div className="flex items-center gap-2 mt-2">
+                <Input
+                  type="number"
+                  min={1}
+                  className="input-3d h-12"
+                  placeholder="From e.g. 5000"
+                  value={baseQty || ''}
+                  onChange={e => recomputeDefaults(Number(e.target.value) || 0)}
+                />
+                <span className="text-xs text-muted-foreground shrink-0">to</span>
+                <Input
+                  type="number"
+                  min={1}
+                  className="input-3d h-12"
+                  placeholder="To e.g. 10000"
+                  value={baseQtyMax || ''}
+                  onChange={e => setBaseQtyMax(Number(e.target.value) || 0)}
+                />
+              </div>
               <p className="text-[11px] text-muted-foreground mt-1">
-                Each link will automatically receive random natural engagement quantities calculated from your bundle's Min% and Max% ratios.
+                Every reel gets a different random views number inside this range (e.g. 5000–10000). All other engagement is then set randomly from your bundle's Min% and Max% ratios. Put the same number in both boxes for a fixed quantity.
               </p>
             </div>
             <div>
@@ -472,6 +529,31 @@ export default function MassOrder() {
                   </div>
                 )}
               </div>
+            </div>
+          </div>
+          <div className="grid md:grid-cols-2 gap-4">
+            <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-secondary border border-border">
+              <div className="min-w-0">
+                <Label className="flex items-center gap-1.5"><Flame className="w-4 h-4 text-primary" /> Peak Hours (USA Time)</Label>
+                <p className="text-[11px] text-muted-foreground mt-0.5">More delivery during 6–11 PM New York time, slower at US night.</p>
+              </div>
+              <Switch checked={peakUS} onCheckedChange={setPeakUS} />
+            </div>
+            <div className="p-3 rounded-xl bg-secondary border border-border">
+              <div className="flex items-center justify-between gap-3">
+                <Label className="flex items-center gap-1.5"><ShieldCheck className="w-4 h-4 text-primary" /> Random Variance &amp; Detection Risk</Label>
+                <span className="font-mono text-sm font-bold px-2 py-0.5 rounded-lg bg-primary/15 text-primary">±{variance}%</span>
+              </div>
+              <input
+                type="range"
+                min={MIN_VARIANCE_PERCENT}
+                max={90}
+                step={5}
+                value={variance}
+                onChange={e => setVariance(Math.max(MIN_VARIANCE_PERCENT, Number(e.target.value) || MIN_VARIANCE_PERCENT))}
+                className="w-full mt-2 accent-primary"
+              />
+              <p className="text-[11px] text-muted-foreground mt-0.5">Auto set to 50%+ on every reel — low detection risk.</p>
             </div>
           </div>
         </div>
@@ -517,7 +599,7 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-lg font-semibold">Preview ({rows.length} Links)</h2>
-                <p className="text-xs text-muted-foreground">Each video has randomized organic ratios and custom comments attached.</p>
+                <p className="text-xs text-muted-foreground">Each reel has random views, random ratios, its own delivery curve and custom comments attached.</p>
               </div>
               <span className="px-3 py-1.5 rounded-lg bg-primary/15 text-primary text-sm font-medium">
                 {rows.length} link(s)
@@ -541,6 +623,7 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                         )}
                       </div>
                       <div className="flex gap-1">
+                        <button title="New random curve" onClick={() => setRows(prev => prev.map(x => x.id === r.id ? rebuildRow(x, newCurveSeed()) : x))} className="text-muted-foreground hover:text-primary p-1"><Shuffle className="w-4 h-4" /></button>
                         <button onClick={() => setEditing(r)} className="text-muted-foreground hover:text-primary p-1"><Pencil className="w-4 h-4" /></button>
                         <button onClick={() => setRows(rows.filter(x => x.id !== r.id))} className="text-muted-foreground hover:text-destructive p-1"><Trash2 className="w-4 h-4" /></button>
                       </div>
@@ -556,6 +639,15 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                         </span>
                       ))}
                     </div>
+                    {(r.runs.views?.length ?? 0) > 0 && (
+                      <div className="mt-3 rounded-lg border border-border bg-background/60 px-2 pt-1">
+                        <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                          <span>{curveStyleFor(r.seed).name} curve #{String(r.seed).slice(-4)} · {r.runs.views.length} runs</span>
+                          <span>{peakUS ? '🔥 USA peak' : ''} ±{variance}%</span>
+                        </div>
+                        <CurveSparkline runs={r.runs.views} height={40} />
+                      </div>
+                    )}
                     <div className="mt-3 flex items-center justify-between text-[11px] text-muted-foreground">
                       <span>⏱ {r.timeframe}</span>
                       <span className="text-primary font-semibold">{activeTypes.length} type(s)</span>
@@ -596,7 +688,8 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                     value={editing.base_quantity}
                     onChange={e => {
                       const b = Number(e.target.value) || 0;
-                      setEditing({ ...editing, base_quantity: b });
+                      // Views changed → every engagement follows its own random percentage.
+                      setEditing({ ...editing, base_quantity: b, qty: quantitiesFor(b, editing.pct, editing.custom_comments) });
                     }}
                   />
                 </div>
@@ -648,7 +741,11 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                         min={0}
                         className="h-8 w-20 text-xs text-right"
                         value={editing.qty[t] ?? 0}
-                        onChange={e => setEditing({ ...editing, qty: { ...editing.qty, [t]: Number(e.target.value) || 0 } })}
+                        onChange={e => {
+                          const v = Number(e.target.value) || 0;
+                          if (t === 'views') setEditing({ ...editing, base_quantity: v, qty: quantitiesFor(v, editing.pct, editing.custom_comments) });
+                          else setEditing({ ...editing, qty: { ...editing.qty, [t]: v } });
+                        }}
                       />
                     </div>
                   ))}

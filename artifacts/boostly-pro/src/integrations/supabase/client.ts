@@ -186,7 +186,15 @@ export const supabase: any = {
   },
   auth: {
     getSession: async () => noSession,
-    getUser: async () => ({ data: { user: null }, error: null }),
+    getUser: async () => {
+      try {
+        const response = await fetch(apiUrl("/auth/me"), { credentials: "same-origin", cache: "no-store" });
+        if (!response.ok) return { data: { user: null }, error: null };
+        const body = await response.json().catch(() => null);
+        const user = body?.user?.id ? { id: String(body.user.id), email: body.user.email ?? "" } : null;
+        return { data: { user }, error: null };
+      } catch { return { data: { user: null }, error: null }; }
+    },
     onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
     signOut: async () => ({ error: null }),
     signInWithPassword: async () => unavailable("Please use the sign-in page."),

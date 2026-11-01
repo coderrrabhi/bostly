@@ -37,6 +37,9 @@ import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover
 import { Switch } from "@/components/ui/switch";
 import { useDebounce } from "@/hooks/useDebounce";
 import { FullOrganicConfig } from "@/lib/organic-algorithm";
+import { Textarea } from "@/components/ui/textarea";
+import { MIN_VARIANCE_PERCENT, normalizeRunTotals, randomRatioPercent, US_PEAK_LABEL } from "@/lib/organic-extras";
+import { Flame, MessageSquare } from "lucide-react";
 
 type EngagementConfigs = Record<string, EngagementConfig>;
 
@@ -54,6 +57,8 @@ type UserBundleItem = {
   quantity: number;
   user_bundle_id: string;
   user_service_id: string | null;
+  min_ratio_percent?: number | null;
+  max_ratio_percent?: number | null;
   user_bundle_item_providers?: UserBundleItemProvider[];
 };
 
@@ -116,6 +121,17 @@ export default function EngagementOrder() {
   // regardless of base quantity changes — they can edit each type independently.
   const userEditedQtyRef = useRef<Set<EngagementType>>(new Set());
 
+  // Random ratio % per type (inside the bundle's Min%–Max%), re-rolled per bundle.
+  const [ratioPcts, setRatioPcts] = useState<Record<string, number>>({});
+  // Peak hours in USA time for every engagement type.
+  const [peakUS, setPeakUS] = useState(false);
+  // Custom comments (one per line) for the comments type.
+  const [customCommentsText, setCustomCommentsText] = useState('');
+  const customComments = useMemo(
+    () => customCommentsText.split(/\r?\n/).map((c) => c.trim()).filter(Boolean),
+    [customCommentsText],
+  );
+
   // Local settings toggles (defaulted from localStorage)
   const [isOrganicMode, setIsOrganicMode] = useState(true);
   const [isAutoRatios, setIsAutoRatios] = useState(true);
@@ -142,7 +158,7 @@ export default function EngagementOrder() {
       if (!user?.id) return [];
       const { data, error } = await supabase
         .from('user_bundles')
-        .select('id, name, platform, is_active, user_bundle_items(id, engagement_type, quantity, user_bundle_id, user_service_id, user_bundle_item_providers(id, enabled, priority, provider_service_id, user_provider_account_id))')
+        .select('id, name, platform, is_active, user_bundle_items(id, engagement_type, quantity, user_bundle_id, user_service_id, min_ratio_percent, max_ratio_percent, user_bundle_item_providers(id, enabled, priority, provider_service_id, user_provider_account_id))')
         .eq('user_id', user.id)
         .eq('is_active', true)
         .order('created_at', { ascending: false });
@@ -176,6 +192,16 @@ export default function EngagementOrder() {
   }, [bundlesWithItems, platform]);
 
   const bundlesLoading = userBundlesLoading;
+
+  const rollRatios = useCallback(() => {
+    const next: Record<string, number> = {};
+    (selectedBundle?.user_bundle_items ?? []).forEach((item) => {
+      if (item.engagement_type) next[item.engagement_type] = randomRatioPercent(item.engagement_type, item);
+    });
+    setRatioPcts(next);
+  }, [selectedBundle]);
+
+  useEffect(() => { rollRatios(); }, [rollRatios]);
 
   // Get active engagement types from bundle
   const activeEngagementTypes = useMemo<EngagementType[]>(() => {
@@ -309,9 +335,13 @@ export default function EngagementOrder() {
         // If auto-ratios is OFF, only enable 'views' by default
         const isEnabledByDefault = isAutoRatios || type === 'views';
 
-        // Use user's custom ratio if available from localStorage, else fallback to default
+        // Random % inside the bundle's Min%–Max% (fallback: saved ratio, then default)
         const userRatio = userSavedRatios?.[type];
-        const ratioPercent = typeof userRatio === 'number' ? userRatio : (DEFAULT_RATIOS[type] ?? 1);
+        const ratioPercent = type === 'views'
+          ? 100
+          : typeof ratioPcts[type] === 'number'
+            ? ratioPcts[type]
+            : typeof userRatio === 'number' ? userRatio : (DEFAULT_RATIOS[type] ?? 1);
 
         const ratioQuantity = Math.round(debouncedBaseQuantity * (ratioPercent / 100));
 
@@ -319,19 +349,22 @@ export default function EngagementOrder() {
 
         // Respect user's base quantity exactly — no auto bump to provider minimum.
         // If it's below provider min, the per-card warning will appear.
-        const quantity = ratioQuantity;
+        const quantity = type === 'comments' && customComments.length > 0
+          ? customComments.length
+          : (type === 'views' ? ratioQuantity : Math.max(1, ratioQuantity));
 
         const isUserEdited = userEditedQtyRef.current.has(type);
-        const finalQuantity = isUserEdited && prev[type]
-          ? prev[type].quantity
-          : ((isAutoRatios || !prev[type]) ? quantity : prev[type].quantity);
+        // Views drive everything: other types always follow their % unless the user typed a value.
+        const finalQuantity = type === 'comments' && customComments.length > 0
+          ? customComments.length
+          : (isUserEdited && prev[type] ? prev[type].quantity : quantity);
         const finalPrice = serviceData
           ? (finalQuantity / 1000) * serviceData.pricePerK
           : prev[type]?.price ?? 0;
 
         updated[type] = {
           type,
-          enabled: prev[type] ? prev[type].enabled : isEnabledByDefault,
+          enabled: type === 'comments' && customComments.length > 0 ? true : (prev[type] ? prev[type].enabled : isEnabledByDefault),
           quantity: finalQuantity,
           price: finalPrice,
           serviceId: serviceData?.serviceId ?? prev[type]?.serviceId ?? null,
@@ -339,13 +372,22 @@ export default function EngagementOrder() {
           minQuantity: serviceData?.minQuantity ?? prev[type]?.minQuantity,
           // Per-type organic settings
           timeLimitHours: prev[type]?.timeLimitHours ?? DEFAULT_ORGANIC_SETTINGS.timeLimitHours,
-          variancePercent: prev[type]?.variancePercent ?? DEFAULT_ORGANIC_SETTINGS.variancePercent,
-          peakHoursEnabled: prev[type]?.peakHoursEnabled ?? DEFAULT_ORGANIC_SETTINGS.peakHoursEnabled,
+          variancePercent: Math.max(MIN_VARIANCE_PERCENT, prev[type]?.variancePercent ?? DEFAULT_ORGANIC_SETTINGS.variancePercent),
+          peakHoursEnabled: prev[type]?.peakHoursEnabled ?? peakUS,
         };
       });
       return updated;
     });
-  }, [debouncedBaseQuantity, selectedBundle, servicePrices, userSavedRatios, isAutoRatios]);
+  }, [debouncedBaseQuantity, selectedBundle, servicePrices, userSavedRatios, isAutoRatios, ratioPcts, customComments]);
+
+  const togglePeakUS = (enabled: boolean) => {
+    setPeakUS(enabled);
+    setEngagements((prev) => {
+      const next: EngagementConfigs = {};
+      Object.entries(prev).forEach(([k, v]) => { next[k] = { ...v, peakHoursEnabled: enabled }; });
+      return next;
+    });
+  };
 
   const handleEngagementChange = useCallback((type: EngagementType, config: EngagementConfig) => {
     setEngagements(prev => {
@@ -556,16 +598,12 @@ export default function EngagementOrder() {
                 ...run,
                 run_number: index + 1,
               }));
-              const filteredRuns = rawRuns.filter((run) => (run.quantity_to_send ?? 0) > 0);
-              const lostQty =
-                rawRuns.reduce((s, r) => s + (r.quantity_to_send ?? 0), 0) -
-                filteredRuns.reduce((s, r) => s + r.quantity_to_send, 0);
-              if (lostQty > 0 && filteredRuns.length > 0) {
-                filteredRuns[filteredRuns.length - 1] = {
-                  ...filteredRuns[filteredRuns.length - 1],
-                  quantity_to_send: filteredRuns[filteredRuns.length - 1].quantity_to_send + lostQty,
-                };
-              }
+              // Only reuse the preview if it was built for this exact quantity (not stale);
+              // then drop zero/negative runs while keeping the exact total.
+              const rawTotal = rawRuns.reduce((s, r) => s + (r.quantity_to_send ?? 0), 0);
+              const filteredRuns = rawTotal === config.quantity
+                ? normalizeRunTotals(rawRuns, config.quantity, config.minQuantity ?? 1)
+                : [];
               // Final safety check: only use the schedule if it sums exactly to the
               // order quantity. Any mismatch means the schedule is stale.
               const filteredTotal = filteredRuns.reduce((s, r) => s + r.quantity_to_send, 0);
@@ -588,7 +626,8 @@ export default function EngagementOrder() {
                 })),
                 // Per-type organic settings - always send resolved hours value
                 time_limit_hours: effectiveTimeLimit,
-                variance_percent: config.variancePercent,
+                variance_percent: Math.max(MIN_VARIANCE_PERCENT, config.variancePercent ?? MIN_VARIANCE_PERCENT),
+                custom_comments: type === 'comments' && customComments.length > 0 ? customComments.join("\n") : undefined,
                 peak_hours_enabled: config.peakHoursEnabled,
                 scheduled_runs: scheduledRuns,
               };
@@ -879,6 +918,50 @@ export default function EngagementOrder() {
           </CardContent>
         </Card>
 
+        {/* Peak hours (USA) + variance */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-4">
+          <Card className="glass-card border-2 border-border">
+            <CardContent className="p-3 sm:p-4 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <Label className="text-sm font-bold flex items-center gap-1.5 text-foreground"><Flame className="h-4 w-4 text-primary" /> Peak Hours (USA Time)</Label>
+                <p className="text-[11px] text-muted-foreground mt-0.5">{US_PEAK_LABEL}. Applies to all engagement types.</p>
+              </div>
+              <Switch checked={peakUS} onCheckedChange={togglePeakUS} />
+            </CardContent>
+          </Card>
+          <Card className="glass-card border-2 border-border">
+            <CardContent className="p-3 sm:p-4 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <Label className="text-sm font-bold flex items-center gap-1.5 text-foreground"><Shield className="h-4 w-4 text-primary" /> Random Variance &amp; Detection Risk</Label>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Auto set to 50%+ on every type — low detection risk. Raise it per type in Settings.</p>
+              </div>
+              <span className="font-mono text-sm font-bold px-2 py-0.5 rounded-lg bg-primary/15 text-primary shrink-0">±{MIN_VARIANCE_PERCENT}%+</span>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Custom comments */}
+        {activeEngagementTypes.includes('comments' as EngagementType) && (
+          <Card className="glass-card border-2 border-border">
+            <CardContent className="p-4 sm:p-6 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-base font-bold tracking-tight text-foreground flex items-center gap-2"><MessageSquare className="h-4 w-4" /> Custom Comments (optional)</Label>
+                {customComments.length > 0 && (
+                  <Badge variant="outline" className="text-xs">{customComments.length} comments</Badge>
+                )}
+              </div>
+              <Textarea
+                rows={4}
+                className="font-mono text-[13px]"
+                placeholder={"One comment per line:\nGreat reel!\nLove this 🔥\nSo good"}
+                value={customCommentsText}
+                onChange={(e) => setCustomCommentsText(e.target.value)}
+              />
+              <p className="text-[11px] text-muted-foreground">Leave empty for random comments. When filled, the Comments quantity equals the number of lines.</p>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Engagement Types with Per-Type Settings */}
         <div className="space-y-4 sm:space-y-5">
           <div className="flex items-center justify-between px-1 gap-2">
@@ -889,6 +972,16 @@ export default function EngagementOrder() {
               </p>
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 px-2.5 text-[11px] sm:text-xs gap-1"
+                onClick={() => { userEditedQtyRef.current.clear(); rollRatios(); }}
+                title="Pick new random percentages from your bundle Min%–Max%"
+              >
+                <Shuffle className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Random ratios</span>
+              </Button>
               <Popover>
                 <PopoverTrigger asChild>
                   <button
@@ -921,7 +1014,7 @@ export default function EngagementOrder() {
                       { icon: LinkIcon, title: 'Paste your post link', desc: 'Instagram reel, post or YouTube — one link triggers all engagement types.' },
                       { icon: Eye, title: 'Pick what you want', desc: 'Toggle Views, Likes, Comments, Saves, Shares. Set quantity per type or use the bundle.' },
                       { icon: Brain, title: 'AI plans organic delivery', desc: 'S-curve schedule splits each type into 5–15 runs with ±50% qty variance — no two batches identical.' },
-                      { icon: Clock, title: 'Smart timing', desc: 'Peak hours (6–10 PM IST) get 1.5× boost. Night slows down. ±5min jitter on every run.' },
+                      { icon: Clock, title: 'Smart timing', desc: 'Peak hours (6–11 PM USA time) get a boost. Night slows down. ±5min jitter on every run.' },
                       { icon: Shuffle, title: 'Multi-provider rotation', desc: 'Each run auto-routes to the best available provider for that type — quality stays high.' },
                       { icon: TrendingUp, title: 'Maintained, not dumped', desc: 'Engagement keeps trickling over hours so your post looks consistently active — not spiked.' },
                       { icon: Shield, title: '100% account safe', desc: 'Randomized patterns + human-like pacing = undetectable. Zero ban risk.' },

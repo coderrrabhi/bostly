@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import { PageMeta } from "@/components/seo/PageMeta";
 import { Skeleton } from "@/components/ui/skeleton";
+import { RefillOrderDialog } from "@/components/engagement/RefillOrderDialog";
 
 const ENGAGEMENT_ICONS = {
   views: Eye,
@@ -55,6 +56,7 @@ export default function EngagementOrders() {
   const { user, isLoading: authLoading } = useAuth();
   const { formatPrice } = useCurrency();
   const [searchQuery, setSearchQuery] = useState("");
+  const [refillOrderId, setRefillOrderId] = useState<string | null>(null);
 
   // Instant load with cache + moderate refresh
   const { data: orders, isLoading: ordersLoading, isFetching, refetch } = useQuery({
@@ -194,16 +196,22 @@ export default function EngagementOrders() {
         ) : (
           <div className="space-y-4">
             {filteredOrders?.map((order) => (
-              <OrderCard key={order.id} order={order} onClick={() => navigate(`/engagement-orders/${order.order_number}`)} />
+              <OrderCard key={order.id} order={order} onClick={() => navigate(`/engagement-orders/${order.order_number}`)} onRefill={() => setRefillOrderId(order.id)} />
             ))}
           </div>
         )}
       </div>
+      <RefillOrderDialog
+        orderId={refillOrderId}
+        open={!!refillOrderId}
+        onOpenChange={(o) => { if (!o) setRefillOrderId(null); }}
+        onDone={() => refetch()}
+      />
     </DashboardLayout>
   );
 }
 
-function OrderCard({ order, onClick }: { order: any; onClick: () => void }) {
+function OrderCard({ order, onClick, onRefill }: { order: any; onClick: () => void; onRefill?: () => void }) {
   const { formatPrice } = useCurrency();
   // Calculate progress
   const allRuns = order.items?.flatMap((item: any) => item.runs || []) || [];
@@ -310,6 +318,16 @@ function OrderCard({ order, onClick }: { order: any; onClick: () => void }) {
               {order.link.length > 50 ? order.link.slice(0, 50) + '...' : order.link}
               <ExternalLink className="h-3 w-3" />
             </a>
+            {onRefill && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-2 h-8 px-3 text-xs gap-1.5"
+                onClick={(e) => { e.stopPropagation(); onRefill(); }}
+              >
+                <RefreshCw className="h-3.5 w-3.5" /> Refill (same curve)
+              </Button>
+            )}
           </div>
           <div className="text-right flex items-center gap-2">
             <div>

@@ -117,7 +117,7 @@ export function EngagementTypeCard({
   // Use per-type settings or defaults
   const timeLimitHours = config.timeLimitHours ?? DEFAULT_ORGANIC_SETTINGS.timeLimitHours;
   const isCustomMode = config.timeLimitCustomMode ?? false;
-  const variancePercent = config.variancePercent ?? DEFAULT_ORGANIC_SETTINGS.variancePercent;
+  const variancePercent = Math.max(50, config.variancePercent ?? DEFAULT_ORGANIC_SETTINGS.variancePercent);
   const peakHoursEnabled = config.peakHoursEnabled ?? DEFAULT_ORGANIC_SETTINGS.peakHoursEnabled;
 
   // Calculate full schedule with runs
@@ -659,8 +659,8 @@ export function EngagementTypeCard({
                     <Slider
                       value={[variancePercent]}
                       onValueChange={handleVarianceChange}
-                      min={10}
-                      max={50}
+                      min={50}
+                      max={90}
                       step={5}
                       className="w-full"
                       rangeClassName={cn(
@@ -785,9 +785,9 @@ export function EngagementTypeCard({
                   <div className="min-w-0">
                     <Label className="text-[10px] font-bold flex items-center gap-1.5 text-foreground uppercase tracking-widest">
                       <Flame className="h-3 w-3 text-foreground shrink-0" />
-                      Peak Hours Boost
+                      Peak Hours (USA Time)
                     </Label>
-                    <p className="text-[9px] text-muted-foreground mt-0.5">More during 6-11 PM IST</p>
+                    <p className="text-[9px] text-muted-foreground mt-0.5">More during 6-11 PM USA time (New York)</p>
                   </div>
                   <Switch checked={peakHoursEnabled} onCheckedChange={handlePeakHoursChange} />
                 </div>
