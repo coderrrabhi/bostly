@@ -4,7 +4,7 @@
 // Designed to be 100% undetectable by platform algorithms
 // ===============================================
 
-import { usPeakOffsetMs } from "./organic-extras";
+import { minOrderFor, usPeakOffsetMs } from "./organic-extras";
 export interface OrganicRunConfig {
   runNumber: number;
   scheduledAt: Date;
@@ -44,7 +44,7 @@ const ENGAGEMENT_REACTION_TIMING: Record<string, { startViewIndex: number; minDe
   watch_hours: { startViewIndex: 0, minDelay: 10, maxDelay: 25 },
 };
 
-// Max quantity per single run for very sparse types (comments: 1, sometimes 2).
+// Max quantity per single run for very sparse types (comments: 1, sometimes 2; never above 2).
 const PER_RUN_CAP: Record<string, number> = { comments: 2 };
 
 /**
@@ -73,47 +73,74 @@ export function coordinateEngagementSchedules(
     const type = schedule.engagementType.toLowerCase();
     if (type === 'views' || schedule.runs.length === 0) return schedule;
 
-    const total = schedule.runs.reduce((sum, run) => sum + Math.max(0, run.quantity), 0);
+    const runSum = schedule.runs.reduce((sum, run) => sum + Math.max(0, run.quantity), 0);
+    // Keep the exact requested amount (bundle Min%–Max% of views), not the generator's rounded run sum.
+    const total = Math.round(schedule.totalQuantity) > 0 ? Math.round(schedule.totalQuantity) : runSum;
     if (total <= 0) return schedule;
-    const min = Math.max(1, Math.floor(Number(minimums[type] ?? minimums[schedule.engagementType]) || 1));
+    const min = Math.max(1, minOrderFor(type, Math.floor(Number(minimums[type] ?? minimums[schedule.engagementType]) || 1)) ?? 1);
     const cap = PER_RUN_CAP[type] ? Math.max(min, PER_RUN_CAP[type]) : Infinity;
-
-    // 1) Split the total over the Views runs in proportion to their views (with organic noise).
+    // Organic weight of every Views run (bigger views run = bigger reaction run, with noise).
     const weights = viewRuns.map((run) => Math.max(1, run.quantity) * (0.6 + Math.random() * 0.8));
-    const weightSum = weights.reduce((a, b) => a + b, 0);
-    const raw = weights.map((w) => (total * w) / weightSum);
-    const slots = raw.map((x) => Math.floor(x));
-    let left = total - slots.reduce((a, b) => a + b, 0);
-    raw
-      .map((x, i) => ({ i, r: x - Math.floor(x) + Math.random() * 0.35 }))
-      .sort((a, b) => b.r - a.r)
-      .forEach(({ i }) => { if (left > 0) { slots[i] += 1; left -= 1; } });
-
-    // 2) Respect the provider minimum: carry too-small amounts into the next Views run.
-    let carry = 0;
-    let lastFilled = -1;
-    for (let i = 0; i < slotCount; i += 1) {
-      const q = slots[i] + carry;
-      if (q < min) { slots[i] = 0; carry = q; } else { slots[i] = q; carry = 0; lastFilled = i; }
-    }
-    if (carry > 0) {
-      const target = lastFilled >= 0 ? lastFilled : weights.indexOf(Math.max(...weights));
-      slots[target] += carry;
-    }
-
-    // 3) Build runs: one per Views run, or 1–2 sized chunks for capped types (comments).
+    const meanW = weights.reduce((a, b) => a + b, 0) / Math.max(1, weights.length);
     const sizes: { slot: number; qty: number }[] = [];
-    slots.forEach((q, slot) => {
-      let rest = q;
+
+    if (cap !== Infinity) {
+      // Sparse types (comments): 1 at a time, sometimes 2 — never the same size twice in a row when avoidable.
+      const parts: number[] = [];
+      let rest = total;
       while (rest > 0) {
-        if (rest <= cap) { sizes.push({ slot, qty: rest }); break; }
-        let size = cap > min && Math.random() < 0.7 ? min : cap;
-        if (rest - size > 0 && rest - size < min) size = rest - min >= min ? rest - min : rest;
+        const prev = parts[parts.length - 1];
+        let size = prev === undefined ? (Math.random() < 0.65 ? min : cap) : (prev === min ? cap : (Math.random() < 0.8 ? min : cap));
         size = Math.min(size, rest);
-        sizes.push({ slot, qty: size });
+        if (rest - size > 0 && rest - size < min) size = rest;
+        parts.push(size);
         rest -= size;
       }
-    });
+      // Spread the runs over Views runs, favouring the bigger ones.
+      const pickSlot = () => {
+        const sum = weights.reduce((a, b) => a + b, 0);
+        let r = Math.random() * sum;
+        for (let i = 0; i < weights.length; i += 1) { r -= weights[i]; if (r <= 0) return i; }
+        return weights.length - 1;
+      };
+      const slotsUsed = parts.length <= slotCount
+        ? [...Array(slotCount).keys()].map((slot) => ({ slot, key: Math.pow(Math.random(), meanW / weights[slot]) })).sort((a, b) => b.key - a.key).slice(0, parts.length).map((x) => x.slot).sort((a, b) => a - b)
+        : parts.map(() => pickSlot()).sort((a, b) => a - b);
+      parts.forEach((qty, i) => sizes.push({ slot: slotsUsed[i], qty }));
+    } else {
+      // Every run gets a DIFFERENT quantity (no repeats), sized by its Views run, each >= provider minimum.
+      // Max number of distinct sizes >= min that fit in the total: n*min + n(n-1)/2 <= total.
+      let maxDistinct = 0;
+      while ((maxDistinct + 1) * min + (maxDistinct * (maxDistinct + 1)) / 2 <= total) maxDistinct += 1;
+      const n = Math.max(1, Math.min(slotCount, maxDistinct));
+      // Choose which Views runs carry a reaction run (bigger views runs more likely), keep time order.
+      const chosen = [...Array(slotCount).keys()]
+        .map((slot) => ({ slot, key: Math.pow(Math.random(), meanW / weights[slot]) }))
+        .sort((a, b) => b.key - a.key)
+        .slice(0, n)
+        .map((x) => x.slot);
+      if (n === 1 || maxDistinct === 0) {
+        sizes.push({ slot: chosen[0] ?? 0, qty: total });
+      } else {
+        // Ascending by weight → strictly increasing sizes: min, min+1, ... plus a monotone share of the rest.
+        const byWeight = [...chosen].sort((a, b) => weights[a] - weights[b]);
+        const base = byWeight.map((_, i) => min + i);
+        let remaining = total - base.reduce((a, b) => a + b, 0);
+        const w = byWeight.map((slot) => weights[slot]);
+        const wSum = w.reduce((a, b) => a + b, 0);
+        const extra = w.map((x) => Math.floor((remaining * x) / wSum));
+        for (let i = 1; i < extra.length; i += 1) if (extra[i] < extra[i - 1]) extra[i] = extra[i - 1];
+        let used = extra.reduce((a, b) => a + b, 0);
+        // Pull back any over-allocation from the top while staying strictly increasing.
+        for (let i = extra.length - 1; used > remaining && i >= 0; i -= 1) {
+          const floorExtra = i > 0 ? extra[i - 1] : 0;
+          const take = Math.min(extra[i] - floorExtra, used - remaining);
+          extra[i] -= take; used -= take;
+        }
+        extra[extra.length - 1] += remaining - used;
+        byWeight.forEach((slot, i) => sizes.push({ slot, qty: base[i] + extra[i] }));
+      }
+    }
 
     // 4) Time each run after its Views run and before the next one.
     const template = schedule.runs[0];
@@ -166,8 +193,9 @@ export function coordinateEngagementSchedules(
 // These are last-resort defaults only — real min comes from DB service.min_quantity
 export const PROVIDER_MINIMUMS: Record<string, number> = {
   views: 100,
-  likes: 10,
-  comments: 10,
+  likes: 1,
+  comments: 1,
+  reposts: 1,
   saves: 10,
   shares: 10,
 };

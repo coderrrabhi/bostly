@@ -59,8 +59,20 @@ export function randomRatioPercent(type: string, bundleItem?: { min_ratio_percen
   return lo + Math.random() * (hi - lo);
 }
 
-export function qtyFromPercent(views: number, percent: number): number {
-  return Math.max(1, Math.round(views * (percent / 100)));
+/** Lowest order the provider accepts per type: Like/Comment/Repost start at 1, Share/Save at 10. */
+export const TYPE_MIN_ORDER: Record<string, number> = { likes: 1, comments: 1, reposts: 1, shares: 10, saves: 10 };
+
+/** Hard floor per type (Share/Save never below 10), combined with the mapped service minimum. */
+export function minOrderFor(type: string, serviceMin?: number | null): number | undefined {
+  const floor = type === 'shares' || type === 'saves' ? TYPE_MIN_ORDER[type] : 0;
+  const svc = Number(serviceMin) > 0 ? Number(serviceMin) : 0;
+  const value = Math.max(floor, svc);
+  return value > 0 ? value : undefined;
+}
+
+export function qtyFromPercent(views: number, percent: number, type?: string): number {
+  const qty = Math.max(1, Math.round(views * (percent / 100)));
+  return type ? Math.max(minOrderFor(type) ?? 1, qty) : qty;
 }
 
 /** Deterministic PRNG so a reel's curve can be reproduced exactly from its seed. */

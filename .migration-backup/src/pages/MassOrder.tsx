@@ -12,7 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Rocket, Upload, Package, Pencil, Trash2, Loader2, MessageSquare, Sparkles, Shuffle, Flame, ShieldCheck } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { CurveSparkline } from '@/components/engagement/CurveSparkline';
-import { MIN_VARIANCE_PERCENT, applyCurveStyle, curveStyleFor, normalizeRunTotals, newCurveSeed, qtyFromPercent, randomRatioPercent, randomViewsInRange, withSeed } from '@/lib/organic-extras';
+import { MIN_VARIANCE_PERCENT, applyCurveStyle, curveStyleFor, minOrderFor, normalizeRunTotals, newCurveSeed, qtyFromPercent, randomRatioPercent, randomViewsInRange, withSeed } from '@/lib/organic-extras';
 import { toast } from 'sonner';
 import { NoBundleBanner } from '@/components/NoBundleBanner';
 import { coordinateEngagementSchedules, generateOrganicSchedule } from '@/lib/organic-algorithm';
@@ -215,7 +215,7 @@ export default function MassOrder() {
         return Number(service?.min_quantity) || 0;
       })
       .filter((minimum: number) => minimum > 0);
-    return mins.length ? Math.min(...mins) : undefined;
+    return minOrderFor(t, mins.length ? Math.min(...mins) : undefined);
   };
 
   // Build each reel's own delivery curve from its seed (same seed = same curve).
@@ -254,7 +254,7 @@ export default function MassOrder() {
     ALL_TYPES.forEach((t) => {
       if (t === 'views') qty[t] = views;
       else if (t === 'comments' && comments && comments.length > 0) qty[t] = comments.length;
-      else qty[t] = qtyFromPercent(views, pct[t] ?? 0);
+      else qty[t] = qtyFromPercent(views, pct[t] ?? 0, t);
     });
     return qty;
   }

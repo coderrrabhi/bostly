@@ -38,7 +38,7 @@ import { Switch } from "@/components/ui/switch";
 import { useDebounce } from "@/hooks/useDebounce";
 import { FullOrganicConfig } from "@/lib/organic-algorithm";
 import { Textarea } from "@/components/ui/textarea";
-import { MIN_VARIANCE_PERCENT, normalizeRunTotals, randomRatioPercent, US_PEAK_LABEL } from "@/lib/organic-extras";
+import { MIN_VARIANCE_PERCENT, minOrderFor, normalizeRunTotals, randomRatioPercent, US_PEAK_LABEL } from "@/lib/organic-extras";
 import { Flame, MessageSquare } from "lucide-react";
 
 type EngagementConfigs = Record<string, EngagementConfig>;
@@ -351,7 +351,7 @@ export default function EngagementOrder() {
         // If it's below provider min, the per-card warning will appear.
         const quantity = type === 'comments' && customComments.length > 0
           ? customComments.length
-          : (type === 'views' ? ratioQuantity : Math.max(1, ratioQuantity));
+          : (type === 'views' ? ratioQuantity : Math.max(minOrderFor(type) ?? 1, ratioQuantity));
 
         const isUserEdited = userEditedQtyRef.current.has(type);
         // Views drive everything: other types always follow their % unless the user typed a value.
@@ -369,7 +369,7 @@ export default function EngagementOrder() {
           price: finalPrice,
           serviceId: serviceData?.serviceId ?? prev[type]?.serviceId ?? null,
           userServiceId: serviceData?.userServiceId ?? (prev[type] as any)?.userServiceId ?? null,
-          minQuantity: serviceData?.minQuantity ?? prev[type]?.minQuantity,
+          minQuantity: minOrderFor(type, serviceData?.minQuantity ?? prev[type]?.minQuantity),
           // Per-type organic settings
           timeLimitHours: prev[type]?.timeLimitHours ?? DEFAULT_ORGANIC_SETTINGS.timeLimitHours,
           variancePercent: Math.max(MIN_VARIANCE_PERCENT, prev[type]?.variancePercent ?? DEFAULT_ORGANIC_SETTINGS.variancePercent),
