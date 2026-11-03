@@ -5,7 +5,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Loader2, RefreshCw } from 'lucide-react';
+import { Textarea } from '@/components/ui/textarea';
+import { Loader2, RefreshCw, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { CurveSparkline } from '@/components/engagement/CurveSparkline';
 import { scaleRunsToCurve, type PlainRun } from '@/lib/organic-extras';
@@ -26,6 +27,7 @@ const ORDER_TYPES = ['views', 'likes', 'comments', 'shares', 'reposts', 'saves',
 export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props) {
   const queryClient = useQueryClient();
   const [views, setViews] = useState<number>(0);
+  const [customCommentsText, setCustomCommentsText] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
 
   const { data, isLoading, error } = useQuery({
@@ -43,7 +45,7 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
 
       const { data: bundles } = await supabase
         .from('user_bundles')
-        .select('id, user_bundle_items(id, engagement_type, user_service_id, user_bundle_item_providers(user_provider_account_id, provider_service_id, priority, enabled))')
+        .select('id, user_bundle_items(id, engagement_type, min_ratio_percent, max_ratio_percent, user_service_id, user_bundle_item_providers(user_provider_account_id, provider_service_id, priority, enabled))')
         .eq('id', order.user_bundle_id);
       const { data: services } = await supabase
         .from('user_services')
@@ -64,8 +66,34 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
   }, [items, data]);
 
   useEffect(() => {
-    if (open && originalViews) setViews(originalViews);
-  }, [open, originalViews]);
+    if (open && originalViews) {
+      setViews(originalViews);
+    }
+    if (open && data?.order?.items) {
+      const cItem = (data.order.items as any[]).find((i) => i.engagement_type === 'comments');
+      if (cItem?.custom_comments) {
+        setCustomCommentsText(
+          Array.isArray(cItem.custom_comments) ? cItem.custom_comments.join('\n') : String(cItem.custom_comments)
+        );
+      } else {
+        setCustomCommentsText('');
+      }
+    }
+  }, [open, originalViews, data]);
+
+  const parsedComments = useMemo(() => {
+    const raw = customCommentsText.trim();
+    if (!raw) return [];
+    if (raw.includes('\n')) {
+      return raw.split('\n').map((s) => s.trim()).filter(Boolean);
+    }
+    return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  }, [customCommentsText]);
+
+  const hasCommentsType = useMemo(() => {
+    return items.some((i) => i.engagement_type === 'comments') ||
+      (data?.bundle?.user_bundle_items ?? []).some((b: any) => b.engagement_type === 'comments');
+  }, [items, data]);
 
   const limitsFor = (mappings: any[]) => {
     const matched = (data?.services ?? []).filter((s: any) =>
@@ -78,7 +106,8 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
 
   const plan = useMemo(() => {
     if (!items.length) return [];
-    const factor = originalViews > 0 ? views / originalViews : 1;
+    const factor = originalViews > 0 && views > 0 ? views / originalViews : 1;
+
     return items.map((item) => {
       const bundleItem = (data?.bundle?.user_bundle_items ?? []).find((b: any) => b.engagement_type === item.engagement_type);
       const current = (bundleItem?.user_bundle_item_providers ?? [])
@@ -87,14 +116,59 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
       const stored = Array.isArray(item.provider_mappings) ? item.provider_mappings : [];
       const mappings = current.length ? current : stored;
       const { min, max } = limitsFor(mappings);
-      const hasCustomComments = item.engagement_type === 'comments' && !!item.custom_comments;
-      const raw = item.engagement_type === 'views'
-        ? views
-        : hasCustomComments ? Number(item.quantity) : Math.round(Number(item.quantity) * factor);
-      const quantity = Math.max(min, raw);
-      return { item, bundleItem, mappings, min, max, quantity };
+
+      let quantity = 0;
+      let ratioLabel = '';
+      let customCommentsToUse: string[] | undefined = undefined;
+
+      if (item.engagement_type === 'views') {
+        quantity = Math.max(min, views);
+      } else if (item.engagement_type === 'comments') {
+        if (parsedComments.length > 0) {
+          quantity = Math.max(min, parsedComments.length);
+          customCommentsToUse = parsedComments;
+          ratioLabel = 'Custom';
+        } else {
+          // Recalculate comments from selective percentage of views
+          const minPct = Number(bundleItem?.min_ratio_percent) || 0;
+          const maxPct = Number(bundleItem?.max_ratio_percent) || 0;
+          let pct = 0;
+          if (minPct > 0 && maxPct > 0) {
+            pct = (minPct + maxPct) / 2;
+            ratioLabel = `${pct.toFixed(2)}%`;
+          } else if (minPct > 0) {
+            pct = minPct;
+            ratioLabel = `${pct.toFixed(2)}%`;
+          } else if (originalViews > 0 && Number(item.quantity) > 0) {
+            pct = (Number(item.quantity) / originalViews) * 100;
+            ratioLabel = `${pct.toFixed(2)}%`;
+          }
+          const raw = pct > 0 ? Math.round(views * (pct / 100)) : Math.round(Number(item.quantity) * factor);
+          quantity = Math.max(min, raw);
+        }
+      } else {
+        // Likes, saves, shares, reposts, followers: recalculate dynamically with views
+        const minPct = Number(bundleItem?.min_ratio_percent) || 0;
+        const maxPct = Number(bundleItem?.max_ratio_percent) || 0;
+        let pct = 0;
+        if (minPct > 0 && maxPct > 0) {
+          const origPct = originalViews > 0 ? (Number(item.quantity) / originalViews) * 100 : 0;
+          pct = (origPct >= minPct && origPct <= maxPct) ? origPct : (minPct + maxPct) / 2;
+          ratioLabel = `${pct.toFixed(2)}%`;
+        } else if (minPct > 0) {
+          pct = minPct;
+          ratioLabel = `${pct.toFixed(2)}%`;
+        } else if (originalViews > 0 && Number(item.quantity) > 0) {
+          pct = (Number(item.quantity) / originalViews) * 100;
+          ratioLabel = `${pct.toFixed(2)}%`;
+        }
+        const raw = pct > 0 ? Math.round(views * (pct / 100)) : Math.round(Number(item.quantity) * factor);
+        quantity = Math.max(min, raw);
+      }
+
+      return { item, bundleItem, mappings, min, max, quantity, ratioLabel, customCommentsToUse };
     });
-  }, [items, views, originalViews, data]);
+  }, [items, views, originalViews, data, parsedComments]);
 
   const viewsRuns: PlainRun[] = useMemo(() => {
     const v = items.find((i) => i.engagement_type === 'views') ?? items[0];
@@ -127,7 +201,7 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
               provider_service_id: String(m.provider_service_id),
               priority: m.priority ?? 1,
             })),
-            custom_comments: p.item.custom_comments || undefined,
+            custom_comments: p.customCommentsToUse || p.item.custom_comments || undefined,
             variance_percent: 50,
             scheduled_runs: runs.map((r) => ({
               scheduled_at: r.scheduled_at,
@@ -164,7 +238,7 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><RefreshCw className="w-4 h-4 text-primary" /> Refill with same curve</DialogTitle>
           <DialogDescription>
@@ -185,15 +259,52 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
               </div>
             )}
             <div>
-              <Label>Views for refill</Label>
-              <Input type="number" min={1} className="mt-2" value={views || ''} onChange={(e) => setViews(Number(e.target.value) || 0)} />
-              <p className="text-[11px] text-muted-foreground mt-1">Other engagement changes by the same percentage as the original order.</p>
+              <Label className="text-xs font-semibold">Views for refill</Label>
+              <Input
+                type="number"
+                min={1}
+                className="mt-1.5"
+                value={views || ''}
+                onChange={(e) => setViews(Number(e.target.value) || 0)}
+              />
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Engagement auto-recalculates dynamically based on your bundle's selective % (or original ratio).
+              </p>
             </div>
+
+            {hasCommentsType && (
+              <div className="space-y-1.5 rounded-lg border border-border bg-secondary/20 p-2.5">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs font-semibold flex items-center gap-1.5">
+                    <MessageSquare className="w-3.5 h-3.5 text-primary" /> Custom Comments (Optional)
+                  </Label>
+                  {parsedComments.length > 0 && (
+                    <span className="text-[11px] font-mono text-primary font-bold">{parsedComments.length} comments</span>
+                  )}
+                </div>
+                <Textarea
+                  rows={3}
+                  className="font-mono text-xs bg-background"
+                  placeholder={"One comment per line or comma-separated:\nGreat post!\nAwesome reel\nLove it"}
+                  value={customCommentsText}
+                  onChange={(e) => setCustomCommentsText(e.target.value)}
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Leave empty to auto-calculate from views %. When entered, comments count equals the comments provided.
+                </p>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-2">
               {plan.map((p) => (
                 <div key={p.item.id} className="flex items-center justify-between rounded-lg border border-border bg-secondary/30 px-3 py-2 text-xs">
-                  <span className="capitalize text-muted-foreground">{p.item.engagement_type}</span>
-                  <b className={!p.mappings.length ? 'text-destructive' : ''}>{p.mappings.length ? p.quantity.toLocaleString() : 'not mapped'}</b>
+                  <div className="flex flex-col">
+                    <span className="capitalize text-muted-foreground font-medium">{p.item.engagement_type}</span>
+                    {p.ratioLabel && <span className="text-[10px] text-primary/80 font-mono">{p.ratioLabel}</span>}
+                  </div>
+                  <b className={!p.mappings.length ? 'text-destructive font-mono' : 'font-mono'}>
+                    {p.mappings.length ? p.quantity.toLocaleString() : 'not mapped'}
+                  </b>
                 </div>
               ))}
             </div>

@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Rocket, Upload, Package, Pencil, Trash2, Loader2, MessageSquare, Sparkles, Shuffle, Flame, ShieldCheck } from 'lucide-react';
+import { Rocket, Upload, Package, Pencil, Trash2, Loader2, MessageSquare, Sparkles, Shuffle, Flame, ShieldCheck, TrendingUp } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { CurveSparkline } from '@/components/engagement/CurveSparkline';
 import { MIN_VARIANCE_PERCENT, applyCurveStyle, curveStyleFor, minOrderFor, normalizeRunTotals, newCurveSeed, qtyFromPercent, randomRatioPercent, randomViewsInRange, withSeed } from '@/lib/organic-extras';
@@ -611,6 +611,22 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                 const activeTypes = Object.entries(r.types).filter(([, v]) => v).map(([k]) => k);
                 return (
                   <div key={r.id} className="rounded-xl border border-border bg-secondary/40 p-4">
+                    <div className="flex items-center justify-between gap-2 mb-2 pb-2 border-b border-border/50">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-primary/10 border border-primary/25 text-primary text-xs font-bold">
+                          <TrendingUp className="w-3.5 h-3.5" />
+                          Pattern: {curveStyleFor(r.seed).name} (#{String(r.seed).slice(-4)})
+                        </span>
+                        <span className="text-[10px] text-muted-foreground font-mono bg-background/60 px-2 py-0.5 rounded border border-border">
+                          {r.runs.views?.length ?? 0} runs
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button title="Shuffle pattern / curve" onClick={() => setRows(prev => prev.map(x => x.id === r.id ? rebuildRow(x, newCurveSeed()) : x))} className="text-muted-foreground hover:text-primary p-1"><Shuffle className="w-4 h-4" /></button>
+                        <button onClick={() => setEditing(r)} className="text-muted-foreground hover:text-primary p-1"><Pencil className="w-4 h-4" /></button>
+                        <button onClick={() => setRows(rows.filter(x => x.id !== r.id))} className="text-muted-foreground hover:text-destructive p-1"><Trash2 className="w-4 h-4" /></button>
+                      </div>
+                    </div>
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex-1">
                         <p className="lux-mono text-[9px] text-muted-foreground">LINK</p>
@@ -621,11 +637,6 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                             <span>{r.custom_comments.length} Custom Comments</span>
                           </div>
                         )}
-                      </div>
-                      <div className="flex gap-1">
-                        <button title="New random curve" onClick={() => setRows(prev => prev.map(x => x.id === r.id ? rebuildRow(x, newCurveSeed()) : x))} className="text-muted-foreground hover:text-primary p-1"><Shuffle className="w-4 h-4" /></button>
-                        <button onClick={() => setEditing(r)} className="text-muted-foreground hover:text-primary p-1"><Pencil className="w-4 h-4" /></button>
-                        <button onClick={() => setRows(rows.filter(x => x.id !== r.id))} className="text-muted-foreground hover:text-destructive p-1"><Trash2 className="w-4 h-4" /></button>
                       </div>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[12px]">
@@ -675,6 +686,25 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
           <DialogContent className="max-w-lg">
             <DialogHeader><DialogTitle>Edit Order</DialogTitle></DialogHeader>
             <div className="space-y-4">
+              <div className="rounded-lg border border-primary/25 bg-primary/5 p-3 flex items-center justify-between">
+                <div>
+                  <Label className="text-xs text-primary font-semibold flex items-center gap-1.5">
+                    <TrendingUp className="w-4 h-4" /> Assigned Delivery Curve / Pattern
+                  </Label>
+                  <p className="text-sm font-bold text-foreground mt-0.5">
+                    {curveStyleFor(editing.seed).name} <span className="text-xs font-mono text-muted-foreground">(#{String(editing.seed).slice(-4)})</span>
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1.5 text-xs border-primary/30 text-primary hover:bg-primary/10"
+                  onClick={() => setEditing(rebuildRow(editing, newCurveSeed()))}
+                >
+                  <Shuffle className="w-3.5 h-3.5" /> Shuffle Pattern
+                </Button>
+              </div>
               <div>
                 <Label>Link</Label>
                 <Input className="input-3d mt-2" value={editing.link} onChange={e => setEditing({ ...editing, link: e.target.value })} />
