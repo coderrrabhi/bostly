@@ -542,8 +542,14 @@ async function checkerTick(): Promise<void> {
   }
 }
 
+/** Kick the executor now (e.g. right after an order is placed). Safe to call often. */
+export function triggerRotationExecutor(): void {
+  setTimeout(() => void executorTick(), 250);
+}
+
 export function startMultiProviderRotationWorkers(): void {
   void Promise.all([executorTick(), checkerTick()]);
-  setInterval(() => void executorTick(), 60_000).unref();
+  // Check for due runs every 15 s so delivery starts at the chosen time, not up to a minute late.
+  setInterval(() => void executorTick(), 15_000).unref();
   setInterval(() => void checkerTick(), 60_000).unref();
 }

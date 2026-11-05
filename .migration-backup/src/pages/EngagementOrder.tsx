@@ -1,3 +1,5 @@
+import { DeliveryStartAndMinimums } from "@/components/engagement/DeliveryStartAndMinimums";
+import { loadDeliverySettings, deliveryPayload, type DeliverySettings } from "@/lib/order-delivery-settings";
 import { useState, useMemo, useEffect, useCallback, useRef, memo } from "react";
 import { useNavigate, Navigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -127,6 +129,7 @@ export default function EngagementOrder() {
   const [ratioPcts, setRatioPcts] = useState<Record<string, number>>({});
   // Peak hours in USA time for every engagement type.
   const [peakUS, setPeakUS] = useState(false);
+  const [deliverySettings, setDeliverySettings] = useState<DeliverySettings>(() => loadDeliverySettings());
   // Custom comments (one per line) for the comments type.
   const [customCommentsText, setCustomCommentsText] = useState('');
   const customComments = useMemo(
@@ -664,6 +667,7 @@ export default function EngagementOrder() {
           base_quantity: baseQuantity,
           total_price: totalPrice,
           is_organic_mode: isOrganicMode,
+          ...deliveryPayload(deliverySettings),
           // Per-type settings will be in each engagement object
           engagements: selectedEngagements
             .map(({ type, config, bundleItem, providerMappings }) => {
@@ -1006,6 +1010,9 @@ export default function EngagementOrder() {
             />
           </CardContent>
         </Card>
+
+        {/* Start time + minimum order per run */}
+        <DeliveryStartAndMinimums value={deliverySettings} onChange={setDeliverySettings} />
 
         {/* 1. Timeframe Box (Auto / Custom) */}
         <Card className="glass-card border-2 border-border overflow-hidden">

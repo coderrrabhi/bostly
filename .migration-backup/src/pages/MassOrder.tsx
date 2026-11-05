@@ -1,3 +1,5 @@
+import { DeliveryStartAndMinimums } from "@/components/engagement/DeliveryStartAndMinimums";
+import { loadDeliverySettings, deliveryPayload, type DeliverySettings } from "@/lib/order-delivery-settings";
 import { useMemo, useState } from 'react';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { PageMeta } from '@/components/seo/PageMeta';
@@ -120,6 +122,7 @@ export default function MassOrder() {
   const [baseQtyMax, setBaseQtyMax] = useState(10000);
   const [defaultsQty, setDefaultsQty] = useState<Record<string, number>>(() => defaultQty(5000));
   const [peakUS, setPeakUS] = useState(false);
+  const [deliverySettings, setDeliverySettings] = useState<DeliverySettings>(() => loadDeliverySettings());
   const [variance, setVariance] = useState(MIN_VARIANCE_PERCENT);
   const [timeframe, setTimeframe] = useState('Under 24 hours');
   const [campaign, setCampaign] = useState('');
@@ -406,6 +409,7 @@ export default function MassOrder() {
             base_quantity: r.base_quantity,
             total_price: perRowCost(r),
             is_organic_mode: true,
+            ...deliveryPayload(deliverySettings),
             notes: campaign ? `Mass Order: ${campaign}` : 'Mass Order',
             engagements,
           },
@@ -448,6 +452,9 @@ export default function MassOrder() {
             </div>
           </div>
         </div>
+
+        {/* Start time + minimum order per run */}
+        <DeliveryStartAndMinimums value={deliverySettings} onChange={setDeliverySettings} />
 
         {/* Bundle + Campaign */}
         <div className="glass-card p-6 space-y-5">

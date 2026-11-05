@@ -93,6 +93,12 @@ interface EditRunData {
   runNumber?: number;
 }
 
+
+async function ownerOrderAction(orderId: string, action: "pause" | "resume" | "delete") {
+  const { data, error } = await supabase.functions.invoke("engagement-order-action", { body: { order_ids: [orderId], action } });
+  if (error || (data as any)?.error) throw new Error((data as any)?.error || error?.message || "Action failed");
+}
+
 export default function EngagementOrderDetail() {
   const { orderNumber } = useParams();
   const navigate = useNavigate();
@@ -260,6 +266,7 @@ export default function EngagementOrderDetail() {
   const cancelOrderMutation = useMutation({
     mutationFn: async () => {
       if (!order?.id || !order?.items) throw new Error('No order data');
+      if (!isAdmin) { await ownerOrderAction(order.id, "delete"); navigate('/engagement-orders'); return; }
 
       const now = new Date().toISOString();
       const itemIds = order.items.map((item: any) => item.id);
@@ -308,6 +315,7 @@ export default function EngagementOrderDetail() {
   const pauseOrderMutation = useMutation({
     mutationFn: async () => {
       if (!order?.id) throw new Error('No order');
+      if (!isAdmin) { await ownerOrderAction(order.id, "pause"); return; }
       const { error } = await supabase
         .from('engagement_orders')
         .update({ status: 'paused' })
@@ -334,6 +342,7 @@ export default function EngagementOrderDetail() {
   const resumeOrderMutation = useMutation({
     mutationFn: async () => {
       if (!order?.id) throw new Error('No order');
+      if (!isAdmin) { await ownerOrderAction(order.id, "resume"); return; }
       const now = new Date().toISOString();
       
       // Resume order
@@ -772,9 +781,9 @@ export default function EngagementOrderDetail() {
             />
 
             {/* Admin Controls */}
-            {isAdmin && order.status !== 'cancelled' && order.status !== 'completed' && (
+            {order.status !== 'cancelled' && order.status !== 'deleted' && (
               <>
-                {order.status === 'paused' ? (
+                {order.status === 'completed' ? null : order.status === 'paused' ? (
                   <Button 
                     size="sm" 
                     variant="outline"
@@ -800,7 +809,7 @@ export default function EngagementOrderDetail() {
                   <AlertDialogTrigger asChild>
                     <Button size="sm" variant="destructive">
                       <Ban className="h-4 w-4 mr-1" />
-                      Cancel Order
+                      {isAdmin ? 'Cancel Order' : 'Delete Order'}
                     </Button>
                   </AlertDialogTrigger>
                   <AlertDialogContent>
