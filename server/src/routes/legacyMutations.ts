@@ -8,7 +8,7 @@ const router: IRouter = Router(); router.use(requireAuth);
 const schema = z.object({ table: z.enum(["user_provider_accounts", "user_services", "user_bundles", "user_bundle_items", "user_bundle_item_providers", "subscriptions", "subscription_requests", "engagement_orders", "engagement_order_items", "organic_run_schedule"]), action: z.enum(["insert", "update", "delete", "upsert"]), values: z.any().optional(), filters: z.array(z.object({ operator: z.enum(["eq", "neq", "in", "is", "notIn", "lt"]).optional(), column: z.string(), value: z.any() })).default([]) });
 const columns: Record<string, string[]> = {
   user_provider_accounts: [], user_services: ["name", "category", "type", "rate", "min_quantity", "max_quantity", "refill", "cancel_allowed", "is_active"],
-  user_bundles: ["name", "description", "platform"], user_bundle_items: ["engagement_type", "quantity", "min_ratio_percent", "max_ratio_percent"],
+  user_bundles: ["name", "description", "platform"], user_bundle_items: ["engagement_type", "quantity", "min_ratio_percent", "max_ratio_percent", "min_quantity", "max_quantity"],
   user_bundle_item_providers: ["enabled", "provider_service_id", "priority"],
 };
 function user(req: AuthenticatedRequest): Promise<string> {

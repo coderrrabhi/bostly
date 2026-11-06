@@ -311,6 +311,12 @@ function ProvidersPanel({
   const [maxRatio, setMaxRatio] = useState<string>(
     item?.max_ratio_percent != null ? String(item.max_ratio_percent) : defaultMax
   );
+  const [minQty, setMinQty] = useState<string>(
+    item?.min_quantity != null ? String(item.min_quantity) : ''
+  );
+  const [maxQty, setMaxQty] = useState<string>(
+    item?.max_quantity != null ? String(item.max_quantity) : ''
+  );
 
   const { data: mappingRows } = useQuery({
     queryKey: ['ubi-providers', itemId],
@@ -368,6 +374,26 @@ function ProvidersPanel({
             ratioChanged = true;
           }
         }
+      }
+
+      // 1b. Save min and max order quantity (all types, including views)
+      const minQtyVal = minQty.trim() !== '' ? Math.max(0, Math.floor(Number(minQty))) : null;
+      const maxQtyVal = maxQty.trim() !== '' ? Math.max(0, Math.floor(Number(maxQty))) : null;
+      if (minQtyVal != null && maxQtyVal != null && minQtyVal > maxQtyVal) {
+        toast.error('Min quantity cannot be greater than Max quantity');
+        return;
+      }
+      if (minQtyVal !== (item?.min_quantity ?? null) || maxQtyVal !== (item?.max_quantity ?? null)) {
+        const { error: qErr } = await supabase
+          .from('user_bundle_items')
+          .update({ min_quantity: minQtyVal, max_quantity: maxQtyVal })
+          .eq('id', itemId);
+        if (qErr) {
+          console.error('[save qty error]', qErr);
+          toast.error(qErr.message || 'Failed to update min/max quantity');
+          return;
+        }
+        ratioChanged = true;
       }
 
       const changed: { accountId: string; draft: Draft; existing: any }[] = [];
@@ -495,6 +521,46 @@ function ProvidersPanel({
           </div>
         </div>
       )}
+
+      {/* Min/Max order quantity setup — applies to every type incl. views */}
+      <div className="bg-muted/40 border rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+            <Sliders className="w-3.5 h-3.5 text-primary" />
+            <span>Order Quantity Limits (Min – Max)</span>
+          </div>
+          <p className="text-[11px] text-muted-foreground mt-0.5">
+            Orders for <b>{item?.engagement_type}</b> will never go below Min or above Max. Leave empty to use the provider's own limits.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 self-start sm:self-auto shrink-0">
+          <div className="flex items-center gap-1 bg-background border-2 border-border focus-within:border-primary rounded-lg px-2.5 py-1 shadow-sm">
+            <span className="text-[11px] font-medium text-muted-foreground">Min</span>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              value={minQty}
+              onChange={(e) => setMinQty(e.target.value)}
+              placeholder="Min qty"
+              className="w-20 h-7 text-xs font-mono font-bold bg-transparent border-0 focus:outline-none text-right"
+            />
+          </div>
+          <span className="text-muted-foreground font-bold">—</span>
+          <div className="flex items-center gap-1 bg-background border-2 border-border focus-within:border-primary rounded-lg px-2.5 py-1 shadow-sm">
+            <span className="text-[11px] font-medium text-muted-foreground">Max</span>
+            <input
+              type="number"
+              step="1"
+              min="0"
+              value={maxQty}
+              onChange={(e) => setMaxQty(e.target.value)}
+              placeholder="Max qty"
+              className="w-20 h-7 text-xs font-mono font-bold bg-transparent border-0 focus:outline-none text-right"
+            />
+          </div>
+        </div>
+      </div>
 
       <div className="text-xs text-muted-foreground">Which provider accounts can fulfill "{itemLabel}"</div>
       <div className="rounded-lg border overflow-hidden bg-card">

@@ -62,11 +62,12 @@ export function randomRatioPercent(type: string, bundleItem?: { min_ratio_percen
 /** Lowest order the provider accepts per type: Like/Comment/Repost start at 1, Share/Save at 10. */
 export const TYPE_MIN_ORDER: Record<string, number> = { likes: 1, comments: 1, reposts: 1, shares: 10, saves: 10 };
 
-/** Hard floor per type (Share/Save never below 10), combined with the mapped service minimum. */
+/** Provider's own service minimum wins when known (e.g. a Saves service with min 1 shows Min 1);
+ *  the hardcoded floor only applies when no service minimum is available. */
 export function minOrderFor(type: string, serviceMin?: number | null): number | undefined {
   const floor = type === 'shares' || type === 'saves' ? TYPE_MIN_ORDER[type] : 0;
   const svc = Number(serviceMin) > 0 ? Number(serviceMin) : 0;
-  const value = Math.max(floor, svc);
+  const value = svc > 0 ? svc : floor;
   return value > 0 ? value : undefined;
 }
 

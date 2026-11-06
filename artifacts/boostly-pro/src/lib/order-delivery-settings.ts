@@ -4,7 +4,7 @@ export const DEFAULT_MIN_QUANTITIES: Record<string, number> = {
   likes: 2,
   comments: 1,
   saves: 2,
-  shares: 10,
+  shares: 2,
   reposts: 1,
 };
 

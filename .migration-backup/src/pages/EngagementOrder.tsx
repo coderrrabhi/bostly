@@ -63,6 +63,8 @@ type UserBundleItem = {
   user_service_id: string | null;
   min_ratio_percent?: number | null;
   max_ratio_percent?: number | null;
+  min_quantity?: number | null;
+  max_quantity?: number | null;
   user_bundle_item_providers?: UserBundleItemProvider[];
 };
 
@@ -163,7 +165,7 @@ export default function EngagementOrder() {
       if (!user?.id) return [];
       const { data, error } = await supabase
         .from('user_bundles')
-        .select('id, name, platform, is_active, user_bundle_items(id, engagement_type, quantity, user_bundle_id, user_service_id, min_ratio_percent, max_ratio_percent, user_bundle_item_providers(id, enabled, priority, provider_service_id, user_provider_account_id))')
+        .select('id, name, platform, is_active, user_bundle_items(id, engagement_type, quantity, user_bundle_id, user_service_id, min_ratio_percent, max_ratio_percent, min_quantity, max_quantity, user_bundle_item_providers(id, enabled, priority, provider_service_id, user_provider_account_id))')
         .eq('user_id', user.id)
         .eq('is_active', true)
         .order('created_at', { ascending: false });
@@ -204,7 +206,7 @@ export default function EngagementOrder() {
       if (item.engagement_type) next[item.engagement_type] = randomRatioPercent(item.engagement_type, item);
     });
     setRatioPcts(next);
-  }, [selectedBundle]);
+  }, [selectedBundle?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { rollRatios(); }, [rollRatios]);
 
@@ -373,12 +375,16 @@ export default function EngagementOrder() {
         const mins = matchedServices.map((s: any) => Number(s.min_quantity || 0)).filter((n: number) => n > 0);
         const maxes = matchedServices.map((s: any) => Number(s.max_quantity || 0)).filter((n: number) => n > 0);
 
+        // Bundle-level Min/Max (set on My Bundles page) overrides the provider's limits.
+        const bundleMin = Number(item.min_quantity || 0);
+        const bundleMax = Number(item.max_quantity || 0);
+
         prices[item.engagement_type] = {
           pricePerK: Number(cheapest.rate) || 0,
           serviceId: null,
           userServiceId: cheapest.id,
-          minQuantity: mins.length > 0 ? Math.min(...mins) : 0,
-          maxQuantity: maxes.length > 0 ? Math.max(...maxes) : undefined,
+          minQuantity: bundleMin > 0 ? bundleMin : (mins.length > 0 ? Math.min(...mins) : 0),
+          maxQuantity: bundleMax > 0 ? bundleMax : (maxes.length > 0 ? Math.max(...maxes) : undefined),
         };
         return;
       }
@@ -386,11 +392,14 @@ export default function EngagementOrder() {
       // If services were not imported, still show the card from provider mappings.
       // Backend will validate/route by provider_service_id; price stays hidden/zero.
       if (mappedProviders.length > 0) {
+        const bundleMin = Number(item.min_quantity || 0);
+        const bundleMax = Number(item.max_quantity || 0);
         prices[item.engagement_type] = {
           pricePerK: 0,
           serviceId: null,
           userServiceId: null,
-          minQuantity: item.engagement_type === 'views' ? 100 : 0,
+          minQuantity: bundleMin > 0 ? bundleMin : (item.engagement_type === 'views' ? 100 : 0),
+          maxQuantity: bundleMax > 0 ? bundleMax : undefined,
         };
       }
     });
@@ -513,6 +522,8 @@ export default function EngagementOrder() {
 
       Object.keys(prev).forEach((type) => {
         const engType = type as EngagementType;
+        if (userEditedQtyRef.current.has(engType)) return;
+        if (engType === 'comments' && customComments.length > 0) return;
         const desired = nextQuantities[engType];
         if (typeof desired !== 'number' || Number.isNaN(desired)) return;
 
@@ -535,7 +546,7 @@ export default function EngagementOrder() {
 
       return changed ? updated : prev;
     });
-  }, [drawModeState.isEnabled, drawModeState.points, baseTypeQuantities]);
+  }, [drawModeState.isEnabled, drawModeState.points, baseTypeQuantities, customComments]);
 
   // Handle curve change from drawable chart (end-of-drag / preset / reset)
   const handleCurveChange = useCallback((type: EngagementType, points: ControlPoint[]) => {
@@ -1427,6 +1438,7 @@ export default function EngagementOrder() {
                   baseQuantity={baseQuantity}
                   onChange={(config) => handleEngagementChange(type, config)}
                   minQuantity={engagements[type]?.minQuantity}
+                  maxQuantity={servicePrices[type]?.maxQuantity}
                   customCurvePoints={drawModeState.isEnabled ? drawModeState.points[type] : undefined}
                   pricePerK={servicePrices[type]?.pricePerK}
                   previewSchedule={previewSchedules[type]}

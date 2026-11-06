@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { AppErrorBoundary } from "@/components/app/AppErrorBoundary";
 import { Loader2 } from "lucide-react";
 import { routeLoaders } from "@/lib/routePreload";
+import { ContactHelp } from "@/components/ContactHelp";
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -39,6 +40,7 @@ const AIIntelligence = lazy(() => import("./pages/AIIntelligence"));
 const Subscription = lazy(() => import("./pages/Subscription"));
 const Admin = lazy(() => import("./pages/admin/Admin"));
 const AdminUsers = lazy(() => import("./pages/admin/AdminUsers"));
+const AdminDevices = lazy(() => import("./pages/admin/AdminDevices"));
 const AdminBundles = lazy(() => import("./pages/admin/AdminBundles"));
 const AdminCronMonitor = lazy(() => import("./pages/admin/AdminCronMonitor"));
 const AdminDeposits = lazy(() => import("./pages/admin/AdminDeposits"));
@@ -132,6 +134,7 @@ const AppRoutes = () => {
       <Route path="/admin" element={<AdminGuard><Admin /></AdminGuard>} />
       <Route path="/admin/services" element={<AdminGuard><AdminServices /></AdminGuard>} />
       <Route path="/admin/users" element={<AdminGuard><AdminUsers /></AdminGuard>} />
+      <Route path="/admin/devices" element={<AdminGuard><AdminDevices /></AdminGuard>} />
       <Route path="/admin/bundles" element={<AdminGuard><AdminBundles /></AdminGuard>} />
       <Route path="/admin/cron-monitor" element={<AdminGuard><AdminCronMonitor /></AdminGuard>} />
       <Route path="/admin/chat" element={<AdminGuard><AdminChat /></AdminGuard>} />
@@ -183,6 +186,7 @@ const App = () => {
               <TooltipProvider>
                 <Toaster />
                 <Sonner />
+                <ContactHelp />
                 <AppErrorBoundary>
                   <ScrollToTop />
                   <Suspense fallback={<PageFallback />}>

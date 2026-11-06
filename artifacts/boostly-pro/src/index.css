@@ -224,3 +224,13 @@ html { font-size: 16px; }
 [data-sonner-toast][data-type="success"] { --toast-rail: linear-gradient(180deg, #34d399, #059669); }
 [data-sonner-toast][data-type="error"] { --toast-rail: linear-gradient(180deg, #fb7185, #e11d48); }
 [data-sonner-toast][data-type="warning"] { --toast-rail: linear-gradient(180deg, #fbbf24, #d97706); }
+
+/* Global subscription/support launcher; leave mobile navigation unobstructed. */
+.contact-help { position: fixed; z-index: 45; right: max(18px, env(safe-area-inset-right)); bottom: max(24px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.contact-help-label { background: hsl(var(--popover)); color: hsl(var(--popover-foreground)); border: 1px solid hsl(var(--border)); border-radius: 6px; padding: 4px 9px; font-size: 11px; font-weight: 600; box-shadow: var(--shadow-soft); }
+.contact-help-actions { display: flex; gap: 8px; padding: 6px; border: 1px solid hsl(var(--border)); background: hsl(var(--popover)); border-radius: 8px; box-shadow: var(--shadow-soft); }
+.contact-help-icon { width: 44px; height: 44px; border-radius: 8px; }
+.contact-help-icon svg { width: 23px; height: 23px; }
+.contact-help-panel { width: min(330px, calc(100vw - 32px)); border-radius: 8px; padding: 18px; }
+@media (max-width: 767px) { .contact-help { right: 12px; bottom: calc(88px + env(safe-area-inset-bottom)); } }
+@media (prefers-reduced-motion: reduce) { .contact-help *, .contact-help-panel { animation: none !important; transition: none !important; } }

@@ -137,7 +137,7 @@ export default function MassOrder() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('user_bundles')
-        .select('id, name, platform, user_bundle_items(id, engagement_type, quantity, user_service_id, min_ratio_percent, max_ratio_percent, user_bundle_item_providers(user_provider_account_id, provider_service_id, priority, enabled))')
+        .select('id, name, platform, user_bundle_items(id, engagement_type, quantity, user_service_id, min_ratio_percent, max_ratio_percent, min_quantity, max_quantity, user_bundle_item_providers(user_provider_account_id, provider_service_id, priority, enabled))')
         .order('created_at', { ascending: false });
       if (error) throw error;
       return data || [];
@@ -208,6 +208,9 @@ export default function MassOrder() {
 
   const providerMinFor = (t: string): number | undefined => {
     const bundleItem = (selectedBundle?.user_bundle_items || []).find((item: any) => item.engagement_type === t);
+    // Bundle-level Min (set on My Bundles page) overrides the provider's minimum.
+    const bundleMin = Number(bundleItem?.min_quantity) || 0;
+    if (bundleMin > 0) return bundleMin;
     const mins = (bundleItem?.user_bundle_item_providers || [])
       .filter((mapping: any) => mapping.enabled && mapping.provider_service_id)
       .map((mapping: any) => {
@@ -651,6 +654,9 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                         <span key={t} className="text-foreground">
                           <span className="capitalize text-muted-foreground">{t}:</span>{' '}
                           <b>{(r.qty[t] ?? 0).toLocaleString()}</b>
+                          {providerMinFor(t) ? (
+                            <span className="ml-1 text-[10px] text-muted-foreground">min {providerMinFor(t)}</span>
+                          ) : null}
                           {t === 'comments' && r.custom_comments?.length ? (
                             <span className="ml-1 text-[10px] text-amber-600 font-semibold">(Custom)</span>
                           ) : null}
