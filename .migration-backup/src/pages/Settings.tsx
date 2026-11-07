@@ -72,6 +72,31 @@ export default function Settings() {
     retweets: 4,
   });
 
+  const DEFAULT_SETTINGS_RATIO_RANGES = {
+    instagram: {
+      likes: { min: 2.1, max: 5.0, label: "Likes / Views", note: "% of views (e.g. 5 = 5%)" },
+      shares: { min: 0.1, max: 0.5, label: "Shares / Views", note: "% of views" },
+      saves: { min: 0.2, max: 0.6, label: "Saves / Views", note: "% of views" },
+      comments: { min: 0.03, max: 0.2, label: "Comments / Views", note: "% of views" },
+      reposts: { min: 0.03, max: 0.25, label: "Reposts / Views", note: "% of views" },
+    },
+    tiktok: {
+      likes: { min: 2.5, max: 6.0, label: "Likes / Views", note: "% of views" },
+      shares: { min: 0.15, max: 0.8, label: "Shares / Views", note: "% of views" },
+      saves: { min: 0.2, max: 0.7, label: "Saves / Views", note: "% of views" },
+      comments: { min: 0.05, max: 0.3, label: "Comments / Views", note: "% of views" },
+      reposts: { min: 0.05, max: 0.3, label: "Reposts / Views", note: "% of views" },
+    },
+    youtube: {
+      likes: { min: 3.0, max: 7.0, label: "Likes / Views", note: "% of views" },
+      comments: { min: 0.1, max: 0.5, label: "Comments / Views", note: "% of views" },
+      shares: { min: 0.1, max: 0.4, label: "Shares / Views", note: "% of views" },
+    },
+  };
+
+  const [activePlatformTab, setActivePlatformTab] = useState<'instagram' | 'tiktok' | 'youtube'>('instagram');
+  const [ratioRanges, setRatioRanges] = useState(DEFAULT_SETTINGS_RATIO_RANGES);
+
   const RATIO_META: Record<string, { label: string; emoji: string; platform: string[] }> = {
     views: { label: 'Views', emoji: '👁️', platform: ['instagram', 'tiktok', 'youtube', 'twitter', 'facebook'] },
     likes: { label: 'Likes', emoji: '❤️', platform: ['instagram', 'tiktok', 'youtube', 'twitter', 'facebook'] },
@@ -102,6 +127,20 @@ export default function Settings() {
         const parsed = JSON.parse(savedOrganic);
         setIsOrganicMode(parsed.isOrganicMode ?? false);
         if (parsed.ratios) setRatios(parsed.ratios);
+        if (parsed.ratioRanges?.full) {
+          setRatioRanges(parsed.ratioRanges.full);
+        } else if (parsed.ratioRanges?.min) {
+          setRatioRanges(prev => {
+            const next = { ...prev };
+            Object.keys(parsed.ratioRanges.min).forEach(k => {
+              if ((next.instagram as any)[k]) {
+                (next.instagram as any)[k].min = parsed.ratioRanges.min[k];
+                (next.instagram as any)[k].max = parsed.ratioRanges.max?.[k] ?? (next.instagram as any)[k].max;
+              }
+            });
+            return next;
+          });
+        }
       }
     } catch { /* ignore parse errors */ }
   }, [profile]);
@@ -163,9 +202,16 @@ export default function Settings() {
 
     // Save organic settings to localStorage (DB columns may not exist yet)
     try {
+      const minMap: Record<string, number> = {};
+      const maxMap: Record<string, number> = {};
+      Object.entries(ratioRanges.instagram).forEach(([k, v]) => {
+        minMap[k] = v.min;
+        maxMap[k] = v.max;
+      });
       localStorage.setItem('organic_settings', JSON.stringify({
         isOrganicMode,
         ratios,
+        ratioRanges: { min: minMap, max: maxMap, full: ratioRanges },
       }));
     } catch { /* ignore storage errors */ }
 
@@ -197,6 +243,55 @@ export default function Settings() {
 
   const updateRatio = (key: keyof typeof ratios, value: number) => {
     setRatios(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handleSaveRatioRanges = () => {
+    try {
+      const existing = localStorage.getItem('organic_settings');
+      const parsed = existing ? JSON.parse(existing) : {};
+      const minMap: Record<string, number> = {};
+      const maxMap: Record<string, number> = {};
+      Object.entries(ratioRanges.instagram).forEach(([k, v]) => {
+        minMap[k] = v.min;
+        maxMap[k] = v.max;
+      });
+      localStorage.setItem('organic_settings', JSON.stringify({
+        ...parsed,
+        isOrganicMode,
+        ratios,
+        ratioRanges: { min: minMap, max: maxMap, full: ratioRanges },
+      }));
+      toast({
+        title: "Engagement Ratios Saved",
+        description: `${activePlatformTab.toUpperCase()} engagement ratios updated successfully.`,
+      });
+    } catch {
+      toast({ title: "Saved", description: "Ratios updated." });
+    }
+  };
+
+  const handleResetRatioRanges = () => {
+    setRatioRanges(DEFAULT_SETTINGS_RATIO_RANGES);
+    try {
+      const existing = localStorage.getItem('organic_settings');
+      const parsed = existing ? JSON.parse(existing) : {};
+      const minMap: Record<string, number> = {};
+      const maxMap: Record<string, number> = {};
+      Object.entries(DEFAULT_SETTINGS_RATIO_RANGES.instagram).forEach(([k, v]) => {
+        minMap[k] = v.min;
+        maxMap[k] = v.max;
+      });
+      localStorage.setItem('organic_settings', JSON.stringify({
+        ...parsed,
+        isOrganicMode,
+        ratios,
+        ratioRanges: { min: minMap, max: maxMap, full: DEFAULT_SETTINGS_RATIO_RANGES },
+      }));
+    } catch { /* ignore */ }
+    toast({
+      title: "Ratios Reset",
+      description: "Engagement ratios restored to official algorithm defaults.",
+    });
   };
 
   const handleChangePassword = () => {
@@ -418,6 +513,134 @@ export default function Settings() {
               <Save className="h-4 w-4 mr-2" />
               Save Changes
             </Button>
+          </CardContent>
+        </Card>
+
+        {/* Engagement Ratios (Percentage of Views Ratio) */}
+        <Card className="glass-card border-2 border-primary/40 bg-gradient-to-br from-primary/5 via-transparent to-primary/10 overflow-hidden shadow-lg">
+          <CardHeader className="relative">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-xl font-bold text-foreground">
+                  <Percent className="h-5 w-5 text-primary" /> Engagement Ratios
+                </CardTitle>
+                <CardDescription className="text-xs text-muted-foreground mt-1">
+                  Min/max engagement-to-view ratios per platform. Used by auto-engagement and organic order sizing. Empty falls back to platform defaults — IG defaults match historical behavior.
+                </CardDescription>
+              </div>
+              <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20 text-xs font-semibold self-start sm:self-auto">
+                Percentage of Views
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Platform Tabs */}
+            <div className="flex items-center gap-2">
+              {(['instagram', 'tiktok', 'youtube'] as const).map((plt) => (
+                <button
+                  key={plt}
+                  type="button"
+                  onClick={() => setActivePlatformTab(plt)}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-xs font-bold capitalize transition-all",
+                    activePlatformTab === plt
+                      ? "bg-primary text-primary-foreground shadow"
+                      : "bg-secondary text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {plt}
+                </button>
+              ))}
+            </div>
+
+            {/* Ratios Table */}
+            <div className="rounded-xl border border-border bg-secondary/30 overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-border/80 text-muted-foreground font-semibold">
+                    <th className="py-3 px-4">Metric</th>
+                    <th className="py-3 px-4">Min</th>
+                    <th className="py-3 px-4">Max</th>
+                    <th className="py-3 px-4">Count at 10,000 views</th>
+                    <th className="py-3 px-4">Note</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/50">
+                  {Object.entries(ratioRanges[activePlatformTab] || {}).map(([metricKey, metric]) => {
+                    const minCount = Math.round(10000 * (metric.min / 100));
+                    const maxCount = Math.round(10000 * (metric.max / 100));
+                    return (
+                      <tr key={metricKey} className="hover:bg-secondary/50 transition-colors">
+                        <td className="py-3 px-4 font-bold text-foreground">{metric.label}</td>
+                        <td className="py-2 px-4">
+                          <div className="flex items-center gap-1.5">
+                            <Input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              max="100"
+                              className="w-20 h-8 text-xs font-mono bg-background text-foreground"
+                              value={metric.min}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value) || 0;
+                                setRatioRanges(prev => ({
+                                  ...prev,
+                                  [activePlatformTab]: {
+                                    ...prev[activePlatformTab],
+                                    [metricKey]: { ...metric, min: val }
+                                  }
+                                }));
+                              }}
+                            />
+                            <span className="text-muted-foreground font-semibold">%</span>
+                          </div>
+                        </td>
+                        <td className="py-2 px-4">
+                          <div className="flex items-center gap-1.5">
+                            <Input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              max="100"
+                              className="w-20 h-8 text-xs font-mono bg-background text-foreground"
+                              value={metric.max}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value) || 0;
+                                setRatioRanges(prev => ({
+                                  ...prev,
+                                  [activePlatformTab]: {
+                                    ...prev[activePlatformTab],
+                                    [metricKey]: { ...metric, max: val }
+                                  }
+                                }));
+                              }}
+                            />
+                            <span className="text-muted-foreground font-semibold">%</span>
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 font-mono font-semibold text-primary">
+                          {minCount} – {maxCount} {metricKey}
+                        </td>
+                        <td className="py-3 px-4 text-muted-foreground">{metric.note}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center gap-3 pt-2">
+              <Button onClick={handleSaveRatioRanges} className="h-9 px-4 text-xs font-bold gap-1.5 shadow-sm">
+                <Save className="w-3.5 h-3.5" /> Save {activePlatformTab.charAt(0).toUpperCase() + activePlatformTab.slice(1)}
+              </Button>
+              <Button variant="outline" onClick={handleResetRatioRanges} className="h-9 px-4 text-xs">
+                Reset to defaults
+              </Button>
+            </div>
+            <p className="text-[11px] text-muted-foreground italic">
+              Tip: values are percentages of views (e.g. 5 = 5%). Saved custom ratios automatically size new orders in Single Order and Mass Order.
+            </p>
           </CardContent>
         </Card>
 

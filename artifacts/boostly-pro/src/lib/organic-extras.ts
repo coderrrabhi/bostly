@@ -41,26 +41,42 @@ export function randomViewsInRange(min: number, max: number, used: Set<number>):
 }
 
 export const DEFAULT_RATIOS_MIN: Record<string, number> = {
-  views: 100, likes: 1.5, shares: 0.1, saves: 0.2, comments: 0.1, reposts: 0.03, followers: 1.0,
+  views: 100, likes: 2.1, shares: 0.1, saves: 0.2, comments: 0.03, reposts: 0.03, followers: 1.0,
 };
 export const DEFAULT_RATIOS_MAX: Record<string, number> = {
-  views: 100, likes: 2.0, shares: 0.5, saves: 0.6, comments: 0.2, reposts: 0.25, followers: 3.0,
+  views: 100, likes: 5.0, shares: 0.5, saves: 0.6, comments: 0.2, reposts: 0.25, followers: 3.0,
 };
+
+export function getUserSavedRatioRanges(): { min: Record<string, number>; max: Record<string, number> } | null {
+  try {
+    const raw = typeof window !== 'undefined' ? localStorage.getItem('organic_settings') : null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed.ratioRanges && parsed.ratioRanges.min && parsed.ratioRanges.max) {
+      return parsed.ratioRanges;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
 
 /** Random percentage for a type between the bundle's Min% and Max% (falls back to defaults). */
 export function randomRatioPercent(type: string, bundleItem?: { min_ratio_percent?: number | null; max_ratio_percent?: number | null }): number {
   if (type === 'views') return 100;
+  const saved = getUserSavedRatioRanges();
+  const defaultMin = saved?.min?.[type] ?? DEFAULT_RATIOS_MIN[type] ?? 2.1;
+  const defaultMax = saved?.max?.[type] ?? DEFAULT_RATIOS_MAX[type] ?? 5.0;
+
   const min = bundleItem?.min_ratio_percent != null && Number(bundleItem.min_ratio_percent) > 0
-    ? Number(bundleItem.min_ratio_percent) : (DEFAULT_RATIOS_MIN[type] ?? 2.1);
+    ? Number(bundleItem.min_ratio_percent) : defaultMin;
   const max = bundleItem?.max_ratio_percent != null && Number(bundleItem.max_ratio_percent) > 0
-    ? Number(bundleItem.max_ratio_percent) : (DEFAULT_RATIOS_MAX[type] ?? 5.0);
+    ? Number(bundleItem.max_ratio_percent) : defaultMax;
   const lo = Math.min(min, max);
   const hi = Math.max(min, max);
   return lo + Math.random() * (hi - lo);
 }
 
-/** Lowest order the provider accepts per type: Like/Comment/Repost start at 1, Share/Save at 10. */
-export const TYPE_MIN_ORDER: Record<string, number> = { likes: 1, comments: 1, reposts: 1, shares: 10, saves: 10 };
+/** Lowest order the provider accepts per type: Like/Comment/Repost start at 1-2, Share at 2, Save at 10, Views at 101. */
+export const TYPE_MIN_ORDER: Record<string, number> = { views: 101, likes: 2, comments: 1, reposts: 1, shares: 2, saves: 10 };
 
 /** Provider's own service minimum wins when known (e.g. a Saves service with min 1 shows Min 1);
  *  the hardcoded floor only applies when no service minimum is available. */

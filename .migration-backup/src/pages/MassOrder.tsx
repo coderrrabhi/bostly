@@ -1,5 +1,5 @@
 import { DeliveryStartAndMinimums } from "@/components/engagement/DeliveryStartAndMinimums";
-import { loadDeliverySettings, deliveryPayload, type DeliverySettings } from "@/lib/order-delivery-settings";
+import { loadDeliverySettings, deliveryPayload, DEFAULT_MIN_QUANTITIES, type DeliverySettings } from "@/lib/order-delivery-settings";
 import { useMemo, useState } from 'react';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { PageMeta } from '@/components/seo/PageMeta';
@@ -230,9 +230,18 @@ export default function MassOrder() {
     const builtAt = Date.now();
     const start = new Date(builtAt + 5 * 60_000);
     const active = Object.keys(types).filter((t) => types[t] && (qty[t] ?? 0) > 0);
+
+    const effectiveMins: Record<string, number> = {};
+    active.forEach(t => {
+      const cfgMin = (deliverySettings.minMode === "custom"
+        ? deliverySettings.customMins[t]
+        : DEFAULT_MIN_QUANTITIES[t]) ?? providerMinFor(t);
+      effectiveMins[t] = Math.max(cfgMin || 0, providerMinFor(t) || 0, 1);
+    });
+
     const schedules = withSeed(seed, () => coordinateEngagementSchedules(
-      active.map((t) => generateOrganicSchedule(t, qty[t], variance, peakUS, start, providerMinFor(t), hours)),
-      Object.fromEntries(active.map((t) => [t, providerMinFor(t)])),
+      active.map((t) => generateOrganicSchedule(t, qty[t], variance, peakUS, start, effectiveMins[t], hours)),
+      effectiveMins,
     ));
     const runs: Record<string, ScheduledRun[]> = {};
     schedules.forEach((schedule) => {
@@ -247,9 +256,9 @@ export default function MassOrder() {
     // Give this reel its own curve shape (fast start, slow burn, viral middle…).
     const styled = applyCurveStyle(runs, start.getTime(), curveStyleFor(seed));
     Object.keys(styled).forEach((t) => { runs[t] = styled[t]; });
-    // Clean up: drop zero/negative runs and keep the exact total (respecting provider minimum).
+    // Clean up: drop zero/negative runs and keep the exact total (respecting provider/custom minimum).
     Object.keys(runs).forEach((t) => {
-      runs[t] = normalizeRunTotals(runs[t], qty[t] ?? 0, providerMinFor(t) ?? 1);
+      runs[t] = normalizeRunTotals(runs[t], qty[t] ?? 0, effectiveMins[t] ?? 1);
     });
     return { runs, builtAt };
   }

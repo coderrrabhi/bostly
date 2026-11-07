@@ -1,5 +1,5 @@
 import { DeliveryStartAndMinimums } from "@/components/engagement/DeliveryStartAndMinimums";
-import { loadDeliverySettings, deliveryPayload, type DeliverySettings } from "@/lib/order-delivery-settings";
+import { loadDeliverySettings, deliveryPayload, DEFAULT_MIN_QUANTITIES, type DeliverySettings } from "@/lib/order-delivery-settings";
 import { useState, useMemo, useEffect, useCallback, useRef, memo } from "react";
 import { useNavigate, Navigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -203,12 +203,24 @@ export default function EngagementOrder() {
   const rollRatios = useCallback(() => {
     const next: Record<string, number> = {};
     (selectedBundle?.user_bundle_items ?? []).forEach((item) => {
-      if (item.engagement_type) next[item.engagement_type] = randomRatioPercent(item.engagement_type, item);
+      if (item.engagement_type && item.engagement_type !== 'views') {
+        next[item.engagement_type] = randomRatioPercent(item.engagement_type, item);
+      }
     });
     setRatioPcts(next);
-  }, [selectedBundle?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedBundle]);
 
   useEffect(() => { rollRatios(); }, [rollRatios]);
+
+  // When base views quantity changes, auto calculate fresh random quantities from selective engagement ratios
+  const prevBaseQuantityRef = useRef(baseQuantity);
+  useEffect(() => {
+    if (prevBaseQuantityRef.current !== baseQuantity) {
+      prevBaseQuantityRef.current = baseQuantity;
+      // Re-roll ratios so fresh random % is applied to the new views quantity
+      rollRatios();
+    }
+  }, [baseQuantity, rollRatios]);
 
   // Get active engagement types from bundle
   const activeEngagementTypes = useMemo<EngagementType[]>(() => {
@@ -447,11 +459,15 @@ export default function EngagementOrder() {
 
         const serviceData = servicePrices[type];
 
-        // Respect user's base quantity exactly — no auto bump to provider minimum.
-        // If it's below provider min, the per-card warning will appear.
+        const configuredMin = (deliverySettings.minMode === "custom"
+          ? deliverySettings.customMins[type]
+          : DEFAULT_MIN_QUANTITIES[type]) ?? minOrderFor(type, serviceData?.minQuantity);
+        const effectiveMin = Math.max(configuredMin || 0, Number(serviceData?.minQuantity || 0), 1);
+
+        // Respect user's base quantity exactly — other types respect effective minimum.
         const quantity = type === 'comments' && customComments.length > 0
           ? customComments.length
-          : (type === 'views' ? ratioQuantity : Math.max(minOrderFor(type) ?? 1, ratioQuantity));
+          : (type === 'views' ? ratioQuantity : Math.max(effectiveMin, ratioQuantity));
 
         const isUserEdited = userEditedQtyRef.current.has(type);
         // Views drive everything: other types always follow their % unless the user typed a value.
@@ -469,7 +485,7 @@ export default function EngagementOrder() {
           price: finalPrice,
           serviceId: serviceData?.serviceId ?? prev[type]?.serviceId ?? null,
           userServiceId: serviceData?.userServiceId ?? (prev[type] as any)?.userServiceId ?? null,
-          minQuantity: minOrderFor(type, serviceData?.minQuantity ?? prev[type]?.minQuantity),
+          minQuantity: effectiveMin,
           // Per-type organic settings
           timeLimitHours: activeTimeframeHours > 0 ? activeTimeframeHours : (prev[type]?.timeLimitHours ?? DEFAULT_ORGANIC_SETTINGS.timeLimitHours),
           variancePercent: Math.max(MIN_VARIANCE_PERCENT, prev[type]?.variancePercent ?? DEFAULT_ORGANIC_SETTINGS.variancePercent),
@@ -479,7 +495,7 @@ export default function EngagementOrder() {
       });
       return updated;
     });
-  }, [debouncedBaseQuantity, selectedBundle, servicePrices, userSavedRatios, isAutoRatios, ratioPcts, customComments, activeTimeframeHours, autoCalculatedRuns]);
+  }, [debouncedBaseQuantity, selectedBundle, servicePrices, userSavedRatios, isAutoRatios, ratioPcts, customComments, activeTimeframeHours, autoCalculatedRuns, deliverySettings]);
 
   const togglePeakUS = (enabled: boolean) => {
     setPeakUS(enabled);

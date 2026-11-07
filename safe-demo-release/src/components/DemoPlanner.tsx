@@ -1,0 +1,25 @@
+import { useRef, useState } from 'react';
+import { Button } from '@/components/ui/button';
+import { RotateCcw, Shuffle } from 'lucide-react';
+import { curveWeights, defaultRatios, patterns, ratioTypes, type Ratios } from '@/lib/demo-planning';
+export function DemoPlanner({ views, ratios, setRatios, onFill, auto, setAuto, hours, setHours, pattern, setPattern, timing, drawn, setDrawn }: {
+  views: string; ratios: Ratios; setRatios: (v: Ratios) => void; onFill: () => void; auto: boolean; setAuto: (v: boolean) => void;
+  hours: string; setHours: (v: string) => void; pattern: number; setPattern: (v: number) => void;
+  timing: { hours: number; runs: number; intervalMinutes: number } | null; drawn: number[]; setDrawn: (v: number[]) => void;
+}) {
+  const dragging = useRef(false); const [extended, setExtended] = useState(false); const [freehand, setFreehand] = useState(false); const [seed, setSeed] = useState('1');
+  function draw(e: React.PointerEvent<SVGSVGElement>) {
+    if (!dragging.current) return;
+    const r = e.currentTarget.getBoundingClientRect(), x = Math.min(29, Math.max(0, Math.round((e.clientX-r.left)/r.width*29))), y = Math.max(.05, Math.min(1, 1-(e.clientY-r.top)/r.height));
+    const next = drawn.length ? [...drawn] : Array.from({length:30},()=>.5); next[x] = y; setDrawn(next);
+  }
+  return <>
+    <details className="demo-planner" open><summary>Percentage-of-views ratios</summary><div className="demo-ratio-head"><span>Engagement</span><span>Min %</span><span>Max %</span></div>{ratioTypes.map(type=><div className="demo-ratio-row" key={type}><label>{type} / Views</label>{(['min','max'] as const).map(key=><input key={key} aria-label={`${type} ratio ${key}`} type="number" min="0" max="100" step="0.01" value={ratios[type][key]} onChange={e=>setRatios({...ratios,[type]:{...ratios[type],[key]:e.target.value}})}/>)}</div>)}<div className="demo-planner-actions"><Button size="sm" onClick={onFill}><Shuffle/>Fill demo quantities</Button><Button variant="ghost" size="icon" title="Reset ratio defaults" aria-label="Reset ratio defaults" onClick={()=>setRatios(structuredClone(defaultRatios))}><RotateCcw/></Button></div><p className="demo-small">Base views: {views} · Uploaded defaults · Whole quantities only</p></details>
+    <div className="demo-section-title demo-divider"><h2>Demo timeframe</h2><div className="demo-segment">{[true,false].map(v=><Button key={String(v)} size="sm" variant={auto===v?'default':'ghost'} aria-pressed={auto===v} onClick={()=>setAuto(v)}>{v?'Auto':'Custom'}</Button>)}</div></div>
+    {!auto&&<><div className="demo-presets">{[2,4,6,8,12,18,24,48].map(h=><Button key={h} size="sm" variant={hours===String(h)?'default':'outline'} onClick={()=>setHours(String(h))}>{h}h</Button>)}</div><label>Custom hours<input aria-label="Custom hours" type="number" min="0.5" max="48" step="0.5" value={hours} onChange={e=>setHours(e.target.value)}/></label></>}
+    <p className="demo-small">{timing?`${timing.hours} hours · ${timing.runs} requested runs · ~${timing.intervalMinutes} min intervals`:'Invalid timeframe or base views'} · Demo estimate only</p>
+    <div className="demo-section-title demo-divider"><h2>Curve / pattern</h2><span className="demo-small">SIMULATED</span></div><div className="demo-patterns">{patterns.map((name,i)=><Button key={name} className="demo-pattern" variant={pattern===i&&!drawn.length?'default':'outline'} onClick={()=>{setPattern(i);setDrawn([]);}} aria-pressed={pattern===i&&!drawn.length}><svg viewBox="0 0 100 30" aria-hidden="true"><polyline fill="none" stroke="currentColor" strokeWidth="2" points={curveWeights(i,20).map((v,k)=>`${k/19*100},${28-Math.min(v,1.5)/1.5*26}`).join(' ')}/></svg><span>{name}</span></Button>)}</div>
+    <label className="demo-minimum-toggle"><span><input type="checkbox" checked={extended} onChange={e=>setExtended(e.target.checked)}/> Extended seeds & freehand</span></label>
+    {extended&&<div className="demo-extended"><label>Pattern seed (1–550)<input aria-label="Pattern seed" type="number" min="1" max="550" value={seed} onChange={e=>setSeed(e.target.value)}/></label><Button size="sm" variant="outline" onClick={()=>{const v=Number(seed);if(Number.isInteger(v)&&v>=1&&v<=550){setPattern(v-1);setDrawn([]);}}}>Apply seed</Button><label><input type="checkbox" checked={freehand} onChange={e=>setFreehand(e.target.checked)}/> Freehand</label>{freehand&&<svg className="demo-draw" viewBox="0 0 300 80" aria-label="Freehand curve canvas" onPointerDown={e=>{dragging.current=true;e.currentTarget.setPointerCapture(e.pointerId);draw(e);}} onPointerMove={draw} onPointerUp={()=>{dragging.current=false;}} onPointerCancel={()=>{dragging.current=false;}}><polyline fill="none" stroke="currentColor" strokeWidth="3" points={(drawn.length?drawn:Array.from({length:30},()=>.5)).map((v,i)=>`${i/29*300},${80-v*80}`).join(' ')}/></svg>}</div>}
+  </>;
+}

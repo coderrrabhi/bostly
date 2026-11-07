@@ -78,68 +78,62 @@ export function coordinateEngagementSchedules(
     const total = Math.round(schedule.totalQuantity) > 0 ? Math.round(schedule.totalQuantity) : runSum;
     if (total <= 0) return schedule;
     const min = Math.max(1, minOrderFor(type, Math.floor(Number(minimums[type] ?? minimums[schedule.engagementType]) || 1)) ?? 1);
-    const cap = PER_RUN_CAP[type] ? Math.max(min, PER_RUN_CAP[type]) : Infinity;
     // Organic weight of every Views run (bigger views run = bigger reaction run, with noise).
     const weights = viewRuns.map((run) => Math.max(1, run.quantity) * (0.6 + Math.random() * 0.8));
     const meanW = weights.reduce((a, b) => a + b, 0) / Math.max(1, weights.length);
     const sizes: { slot: number; qty: number }[] = [];
 
-    if (cap !== Infinity) {
-      // Sparse types (comments): 1 at a time, sometimes 2 — never the same size twice in a row when avoidable.
-      const parts: number[] = [];
-      let rest = total;
-      while (rest > 0) {
-        const prev = parts[parts.length - 1];
-        let size = prev === undefined ? (Math.random() < 0.65 ? min : cap) : (prev === min ? cap : (Math.random() < 0.8 ? min : cap));
-        size = Math.min(size, rest);
-        if (rest - size > 0 && rest - size < min) size = rest;
-        parts.push(size);
-        rest -= size;
-      }
-      // Spread the runs over Views runs, favouring the bigger ones.
-      const pickSlot = () => {
-        const sum = weights.reduce((a, b) => a + b, 0);
-        let r = Math.random() * sum;
-        for (let i = 0; i < weights.length; i += 1) { r -= weights[i]; if (r <= 0) return i; }
-        return weights.length - 1;
-      };
-      const slotsUsed = parts.length <= slotCount
-        ? [...Array(slotCount).keys()].map((slot) => ({ slot, key: Math.pow(Math.random(), meanW / weights[slot]) })).sort((a, b) => b.key - a.key).slice(0, parts.length).map((x) => x.slot).sort((a, b) => a - b)
-        : parts.map(() => pickSlot()).sort((a, b) => a - b);
-      parts.forEach((qty, i) => sizes.push({ slot: slotsUsed[i], qty }));
+    // Generate random varying runs across all engagement types (shares, saves, reposts, comments, likes)
+    // Every run is >= min (never below provider/user minimum) and has natural random variations
+    const maxPossibleRuns = Math.floor(total / min);
+    if (maxPossibleRuns <= 1) {
+      sizes.push({ slot: Math.floor(Math.random() * slotCount), qty: total });
     } else {
-      // Every run gets a DIFFERENT quantity (no repeats), sized by its Views run, each >= provider minimum.
-      // Max number of distinct sizes >= min that fit in the total: n*min + n(n-1)/2 <= total.
-      let maxDistinct = 0;
-      while ((maxDistinct + 1) * min + (maxDistinct * (maxDistinct + 1)) / 2 <= total) maxDistinct += 1;
-      const n = Math.max(1, Math.min(slotCount, maxDistinct));
-      // Choose which Views runs carry a reaction run (bigger views runs more likely), keep time order.
-      const chosen = [...Array(slotCount).keys()]
-        .map((slot) => ({ slot, key: Math.pow(Math.random(), meanW / weights[slot]) }))
-        .sort((a, b) => b.key - a.key)
-        .slice(0, n)
-        .map((x) => x.slot);
-      if (n === 1 || maxDistinct === 0) {
-        sizes.push({ slot: chosen[0] ?? 0, qty: total });
-      } else {
-        // Ascending by weight → strictly increasing sizes: min, min+1, ... plus a monotone share of the rest.
-        const byWeight = [...chosen].sort((a, b) => weights[a] - weights[b]);
-        const base = byWeight.map((_, i) => min + i);
-        let remaining = total - base.reduce((a, b) => a + b, 0);
-        const w = byWeight.map((slot) => weights[slot]);
-        const wSum = w.reduce((a, b) => a + b, 0);
-        const extra = w.map((x) => Math.floor((remaining * x) / wSum));
-        for (let i = 1; i < extra.length; i += 1) if (extra[i] < extra[i - 1]) extra[i] = extra[i - 1];
-        let used = extra.reduce((a, b) => a + b, 0);
-        // Pull back any over-allocation from the top while staying strictly increasing.
-        for (let i = extra.length - 1; used > remaining && i >= 0; i -= 1) {
-          const floorExtra = i > 0 ? extra[i - 1] : 0;
-          const take = Math.min(extra[i] - floorExtra, used - remaining);
-          extra[i] -= take; used -= take;
+      const targetRuns = Math.max(2, Math.min(slotCount, maxPossibleRuns));
+      
+      // Base allocation of min to each run
+      const runQuantities = new Array(targetRuns).fill(min);
+      let remaining = total - (targetRuns * min);
+
+      if (remaining > 0) {
+        // Generate random variance weights for each run (natural random variations)
+        const randWeights = Array.from({ length: targetRuns }, () => 0.35 + Math.random() * 1.5);
+        const sumRW = randWeights.reduce((a, b) => a + b, 0);
+
+        let distributed = 0;
+        for (let i = 0; i < targetRuns; i++) {
+          const share = Math.floor((remaining * randWeights[i]) / sumRW);
+          runQuantities[i] += share;
+          distributed += share;
         }
-        extra[extra.length - 1] += remaining - used;
-        byWeight.forEach((slot, i) => sizes.push({ slot, qty: base[i] + extra[i] }));
+
+        let leftover = remaining - distributed;
+        while (leftover > 0) {
+          const idx = Math.floor(Math.random() * targetRuns);
+          runQuantities[idx] += 1;
+          leftover -= 1;
+        }
       }
+
+      // Jitter adjacent identical runs so every run has different numbers where possible
+      for (let i = 0; i < targetRuns - 1; i++) {
+        if (runQuantities[i] === runQuantities[i + 1] && runQuantities[i] > min) {
+          runQuantities[i] -= 1;
+          runQuantities[i + 1] += 1;
+        }
+      }
+
+      // Pick which Views slots carry these reaction runs
+      const chosenSlots = [...Array(slotCount).keys()]
+        .map((slot) => ({ slot, key: Math.pow(Math.random(), meanW / Math.max(1, weights[slot])) }))
+        .sort((a, b) => b.key - a.key)
+        .slice(0, targetRuns)
+        .map((x) => x.slot)
+        .sort((a, b) => a - b);
+
+      runQuantities.forEach((qty, i) => {
+        sizes.push({ slot: chosenSlots[i] ?? (i % slotCount), qty });
+      });
     }
 
     // 4) Time each run after its Views run and before the next one.
