@@ -47,6 +47,99 @@ const ENGAGEMENT_REACTION_TIMING: Record<string, { startViewIndex: number; minDe
  * Coordinate a full-engagement order around its Views reach curve.
  * Quantities remain independently randomized, but reactions cannot precede Views.
  */
+/**
+ * Generates truly random, varying quantities across multiple runs for any engagement type
+ * (shares, saves, reposts, comments, likes, views).
+ * 
+ * Rules:
+ * 1. Every run quantity is ALWAYS >= min (never below provider/configured minimum).
+ * 2. Sum of all runs EXACTLY equals total.
+ * 3. Quantities are organically varied (no robotic repeating identical numbers like 10, 10, 10, 10).
+ * 4. Number of runs adapts so there is always variance budget.
+ */
+export function generateRandomVaryingRuns(total: number, min: number, maxSlots: number): number[] {
+  if (total <= 0) return [];
+  const effectiveMin = Math.max(1, min);
+  if (total <= effectiveMin) return [total];
+
+  const absoluteMaxRuns = Math.floor(total / effectiveMin);
+  if (absoluteMaxRuns <= 1) return [total];
+
+  // We want healthy variance so runs don't degenerate into all identical minimums.
+  // Leave a variance buffer: target average >= effectiveMin * 1.35 whenever possible.
+  const idealRuns = Math.max(2, Math.floor(total / (effectiveMin * 1.35)));
+  let targetRuns = Math.max(2, Math.min(maxSlots, absoluteMaxRuns, idealRuns));
+
+  // If targetRuns * effectiveMin == total, there is 0 remaining quantity to vary!
+  // In that case, reduce targetRuns by at least 1 (if targetRuns > 2) so we have variance budget.
+  if (targetRuns > 2 && targetRuns * effectiveMin === total) {
+    targetRuns = targetRuns - 1;
+  }
+
+  const runQuantities = new Array(targetRuns).fill(effectiveMin);
+  let remaining = total - (targetRuns * effectiveMin);
+
+  if (remaining > 0) {
+    // Generate distinct random variance weights
+    const randWeights = Array.from({ length: targetRuns }, (_, i) => {
+      const pos = i / Math.max(1, targetRuns - 1);
+      const wave = Math.sin(pos * Math.PI) * 0.8 + 0.6; // gentle natural curve
+      const noise = 0.4 + Math.random() * 1.2;          // natural noise
+      return Math.max(0.1, wave * noise);
+    });
+    const sumW = randWeights.reduce((a, b) => a + b, 0);
+
+    let distributed = 0;
+    for (let i = 0; i < targetRuns; i++) {
+      const share = Math.floor((remaining * randWeights[i]) / sumW);
+      runQuantities[i] += share;
+      distributed += share;
+    }
+
+    let leftover = remaining - distributed;
+    while (leftover > 0) {
+      const idx = Math.floor(Math.random() * targetRuns);
+      runQuantities[idx] += 1;
+      leftover -= 1;
+    }
+  }
+
+  // PASS: Anti-repetition pass to break any adjacent or repeating identical quantities
+  for (let pass = 0; pass < 5; pass++) {
+    for (let i = 0; i < targetRuns - 1; i++) {
+      if (runQuantities[i] === runQuantities[i + 1]) {
+        if (runQuantities[i] > effectiveMin + 1) {
+          runQuantities[i] -= 1;
+          runQuantities[i + 1] += 1;
+        } else {
+          const donorIdx = runQuantities.findIndex((q, idx) => idx !== i && idx !== i + 1 && q > effectiveMin + 1);
+          if (donorIdx !== -1) {
+            runQuantities[donorIdx] -= 1;
+            runQuantities[i] += 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Final check: sum === total without any run dropping below effectiveMin
+  let currentSum = runQuantities.reduce((a, b) => a + b, 0);
+  if (currentSum !== total) {
+    let diff = total - currentSum;
+    for (let i = 0; i < runQuantities.length && diff !== 0; i++) {
+      if (diff > 0) {
+        runQuantities[i] += 1;
+        diff -= 1;
+      } else if (diff < 0 && runQuantities[i] > effectiveMin) {
+        runQuantities[i] -= 1;
+        diff += 1;
+      }
+    }
+  }
+
+  return runQuantities;
+}
+
 export function coordinateEngagementSchedules(schedules: FullOrganicConfig[]): FullOrganicConfig[] {
   const viewsSchedule = schedules.find((schedule) => schedule.engagementType.toLowerCase() === 'views');
   if (!viewsSchedule?.runs.length) return schedules;
@@ -110,11 +203,12 @@ export function coordinateEngagementSchedules(schedules: FullOrganicConfig[]): F
 // Provider minimum order quantity FALLBACKS (actual values come from service table via minQuantity prop)
 // These are last-resort defaults only — real min comes from DB service.min_quantity
 export const PROVIDER_MINIMUMS: Record<string, number> = {
-  views: 100,
-  likes: 10,
-  comments: 10,
+  views: 101,
+  likes: 2,
+  comments: 1,
+  reposts: 1,
   saves: 10,
-  shares: 10,
+  shares: 2,
 };
 
 // Provider maximum order quantity

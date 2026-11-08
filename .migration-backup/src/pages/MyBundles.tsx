@@ -318,6 +318,13 @@ function ProvidersPanel({
     item?.max_quantity != null ? String(item.max_quantity) : ''
   );
 
+  useEffect(() => {
+    setMinRatio(item?.min_ratio_percent != null ? String(item.min_ratio_percent) : defaultMin);
+    setMaxRatio(item?.max_ratio_percent != null ? String(item.max_ratio_percent) : defaultMax);
+    setMinQty(item?.min_quantity != null ? String(item.min_quantity) : '');
+    setMaxQty(item?.max_quantity != null ? String(item.max_quantity) : '');
+  }, [item?.id, item?.min_ratio_percent, item?.max_ratio_percent, item?.min_quantity, item?.max_quantity, defaultMin, defaultMax]);
+
   const { data: mappingRows } = useQuery({
     queryKey: ['ubi-providers', itemId],
     enabled: !!itemId,
@@ -488,35 +495,51 @@ function ProvidersPanel({
               Views is 100% base. When running Mass Orders across multiple videos, each video gets a <b>natural random percentage</b> between Min% and Max%.
             </p>
           </div>
-          <div className="flex items-center gap-2 self-start sm:self-auto shrink-0">
-            <div className="flex items-center gap-1 bg-background border-2 border-border focus-within:border-primary rounded-lg px-2.5 py-1 shadow-sm">
-              <span className="text-[11px] font-medium text-muted-foreground">Min</span>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                max="100"
-                value={minRatio}
-                onChange={(e) => setMinRatio(e.target.value)}
-                placeholder="Min %"
-                className="w-16 h-7 text-xs font-mono font-bold bg-transparent border-0 focus:outline-none text-right"
-              />
-              <span className="text-xs font-semibold text-muted-foreground">%</span>
+          <div className="flex flex-col sm:items-end gap-1.5 self-start sm:self-auto shrink-0">
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1 bg-background border-2 border-border focus-within:border-primary rounded-lg px-2.5 py-1 shadow-sm">
+                <span className="text-[11px] font-medium text-muted-foreground">Min</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="100"
+                  value={minRatio}
+                  onChange={(e) => setMinRatio(e.target.value)}
+                  placeholder="Min %"
+                  className="w-16 h-7 text-xs font-mono font-bold bg-transparent border-0 focus:outline-none text-right"
+                />
+                <span className="text-xs font-semibold text-muted-foreground">%</span>
+              </div>
+              <span className="text-muted-foreground font-bold">-</span>
+              <div className="flex items-center gap-1 bg-background border-2 border-border focus-within:border-primary rounded-lg px-2.5 py-1 shadow-sm">
+                <span className="text-[11px] font-medium text-muted-foreground">Max</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="100"
+                  value={maxRatio}
+                  onChange={(e) => setMaxRatio(e.target.value)}
+                  placeholder="Max %"
+                  className="w-16 h-7 text-xs font-mono font-bold bg-transparent border-0 focus:outline-none text-right"
+                />
+                <span className="text-xs font-semibold text-muted-foreground">%</span>
+              </div>
             </div>
-            <span className="text-muted-foreground font-bold">—</span>
-            <div className="flex items-center gap-1 bg-background border-2 border-border focus-within:border-primary rounded-lg px-2.5 py-1 shadow-sm">
-              <span className="text-[11px] font-medium text-muted-foreground">Max</span>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                max="100"
-                value={maxRatio}
-                onChange={(e) => setMaxRatio(e.target.value)}
-                placeholder="Max %"
-                className="w-16 h-7 text-xs font-mono font-bold bg-transparent border-0 focus:outline-none text-right"
-              />
-              <span className="text-xs font-semibold text-muted-foreground">%</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-semibold text-primary bg-primary/10 border border-primary/20 px-2 py-0.5 rounded">
+                Count at 10k views: {Math.round(10000 * ((Number(minRatio) || 0) / 100))} - {Math.round(10000 * ((Number(maxRatio) || 0) / 100))} {item?.engagement_type}
+              </span>
+              {(minRatio !== defaultMin || maxRatio !== defaultMax) && (
+                <button
+                  type="button"
+                  onClick={() => { setMinRatio(defaultMin); setMaxRatio(defaultMax); }}
+                  className="text-[10px] text-muted-foreground hover:text-foreground underline"
+                >
+                  Reset ({defaultMin}% - {defaultMax}%)
+                </button>
+              )}
             </div>
           </div>
         </div>

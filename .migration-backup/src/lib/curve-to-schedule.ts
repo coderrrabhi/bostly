@@ -198,6 +198,31 @@ export function curveToSchedule(
       });
     }
   }
+
+  // Jitter adjacent identical runs so every run has different numbers where possible
+  for (let pass = 0; pass < 4; pass++) {
+    for (let i = 0; i < runs.length - 1; i++) {
+      if (runs[i].quantity === runs[i + 1].quantity) {
+        if (runs[i].quantity > providerMin + 1) {
+          runs[i].quantity -= 1;
+          runs[i + 1].quantity += 1;
+        } else {
+          const donor = runs.find((r, idx) => idx !== i && idx !== i + 1 && r.quantity > providerMin + 1);
+          if (donor) {
+            donor.quantity -= 1;
+            runs[i].quantity += 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Recalculate cumulative
+  let cumTotal = 0;
+  runs.forEach((r) => {
+    cumTotal += r.quantity;
+    r.cumulativeQuantity = cumTotal;
+  });
   
   return runs;
 }

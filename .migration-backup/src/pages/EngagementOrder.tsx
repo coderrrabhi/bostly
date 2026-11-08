@@ -202,11 +202,18 @@ export default function EngagementOrder() {
 
   const rollRatios = useCallback(() => {
     const next: Record<string, number> = {};
-    (selectedBundle?.user_bundle_items ?? []).forEach((item) => {
-      if (item.engagement_type && item.engagement_type !== 'views') {
-        next[item.engagement_type] = randomRatioPercent(item.engagement_type, item);
-      }
-    });
+    const items = selectedBundle?.user_bundle_items ?? [];
+    if (items.length > 0) {
+      items.forEach((item) => {
+        if (item.engagement_type && item.engagement_type !== 'views') {
+          next[item.engagement_type] = randomRatioPercent(item.engagement_type, item);
+        }
+      });
+    } else {
+      ['likes', 'comments', 'shares', 'saves', 'reposts'].forEach((t) => {
+        next[t] = randomRatioPercent(t);
+      });
+    }
     setRatioPcts(next);
   }, [selectedBundle]);
 
@@ -217,7 +224,8 @@ export default function EngagementOrder() {
   useEffect(() => {
     if (prevBaseQuantityRef.current !== baseQuantity) {
       prevBaseQuantityRef.current = baseQuantity;
-      // Re-roll ratios so fresh random % is applied to the new views quantity
+      // Clear manual locks so all engagement breakdown fields auto-fulfill dynamically on new views
+      userEditedQtyRef.current.clear();
       rollRatios();
     }
   }, [baseQuantity, rollRatios]);
@@ -244,13 +252,12 @@ export default function EngagementOrder() {
   const baseTypeQuantities = useMemo(() => {
     const base: Record<EngagementType, number> = {} as Record<EngagementType, number>;
     activeEngagementTypes.forEach((type) => {
-      // Use user's custom ratio if available from localStorage, else fallback to default
-      const userRatio = userSavedRatios?.[type];
-      const ratio = typeof userRatio === 'number' ? userRatio : DEFAULT_RATIOS[type];
+      const it = selectedBundle?.user_bundle_items?.find((x: any) => x.engagement_type === type);
+      const ratio = type === 'views' ? 100 : (ratioPcts[type] ?? randomRatioPercent(type, it));
       base[type] = Math.round(debouncedBaseQuantity * (ratio / 100));
     });
     return base;
-  }, [debouncedBaseQuantity, activeEngagementTypes, userSavedRatios]);
+  }, [debouncedBaseQuantity, activeEngagementTypes, ratioPcts, selectedBundle]);
   const mappedProviderServiceIds = useMemo(() => {
     const ids = new Set<string>();
     (selectedBundle?.user_bundle_items ?? []).forEach((item) => {
@@ -447,13 +454,13 @@ export default function EngagementOrder() {
         // If auto-ratios is OFF, only enable 'views' by default
         const isEnabledByDefault = isAutoRatios || type === 'views';
 
-        // Random % inside the bundle's Min%–Max% (fallback: saved ratio, then default)
-        const userRatio = userSavedRatios?.[type];
+        const bundleItem = items.find((it: any) => it.engagement_type === type);
+        // Use Selective Engagement Ratio (from Settings / Bundle Min%-Max%) - NOT AI Organic Automation Ratios!
         const ratioPercent = type === 'views'
           ? 100
           : typeof ratioPcts[type] === 'number'
             ? ratioPcts[type]
-            : typeof userRatio === 'number' ? userRatio : (DEFAULT_RATIOS[type] ?? 1);
+            : randomRatioPercent(type, bundleItem);
 
         const ratioQuantity = Math.round(debouncedBaseQuantity * (ratioPercent / 100));
 
@@ -1366,16 +1373,24 @@ export default function EngagementOrder() {
                 Customize organic settings per type
               </p>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+              <Badge variant="outline" className="hidden sm:inline-flex bg-primary/10 text-primary border-primary/20 text-[10px] font-semibold py-1 px-2">
+                <Sparkles className="h-3 w-3 mr-1" />
+                Selective Ratios (Auto)
+              </Badge>
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                className="h-8 px-2.5 text-[11px] sm:text-xs gap-1"
-                onClick={() => { userEditedQtyRef.current.clear(); rollRatios(); }}
-                title="Pick new random percentages from your bundle Min%–Max%"
+                className="h-8 px-2.5 text-[11px] sm:text-xs gap-1 font-semibold hover:bg-primary/10 hover:text-primary transition"
+                onClick={() => {
+                  userEditedQtyRef.current.clear();
+                  rollRatios();
+                  toast.success("Engagement Breakdown auto-fulfilled from selective ratios!");
+                }}
+                title="Auto-fulfill all breakdown quantities using Selective Engagement Ratios"
               >
-                <Shuffle className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Random ratios</span>
+                <Shuffle className="h-3.5 w-3.5" /> <span>Auto-fulfill Ratios</span>
               </Button>
               <Popover>
                 <PopoverTrigger asChild>

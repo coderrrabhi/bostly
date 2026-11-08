@@ -54,6 +54,99 @@ const PER_RUN_CAP: Record<string, number> = { comments: 2 };
  * 1 at a time (sometimes 2), and everything settles inside the Views window.
  * The per-type TOTAL (from the bundle Min%–Max%) is never changed.
  */
+/**
+ * Generates truly random, varying quantities across multiple runs for any engagement type
+ * (shares, saves, reposts, comments, likes, views).
+ * 
+ * Rules:
+ * 1. Every run quantity is ALWAYS >= min (never below provider/configured minimum).
+ * 2. Sum of all runs EXACTLY equals total.
+ * 3. Quantities are organically varied (no robotic repeating identical numbers like 10, 10, 10, 10).
+ * 4. Number of runs adapts so there is always variance budget.
+ */
+export function generateRandomVaryingRuns(total: number, min: number, maxSlots: number): number[] {
+  if (total <= 0) return [];
+  const effectiveMin = Math.max(1, min);
+  if (total <= effectiveMin) return [total];
+
+  const absoluteMaxRuns = Math.floor(total / effectiveMin);
+  if (absoluteMaxRuns <= 1) return [total];
+
+  // We want healthy variance so runs don't degenerate into all identical minimums.
+  // Leave a variance buffer: target average >= effectiveMin * 1.35 whenever possible.
+  const idealRuns = Math.max(2, Math.floor(total / (effectiveMin * 1.35)));
+  let targetRuns = Math.max(2, Math.min(maxSlots, absoluteMaxRuns, idealRuns));
+
+  // If targetRuns * effectiveMin == total, there is 0 remaining quantity to vary!
+  // In that case, reduce targetRuns by at least 1 (if targetRuns > 2) so we have variance budget.
+  if (targetRuns > 2 && targetRuns * effectiveMin === total) {
+    targetRuns = targetRuns - 1;
+  }
+
+  const runQuantities = new Array(targetRuns).fill(effectiveMin);
+  let remaining = total - (targetRuns * effectiveMin);
+
+  if (remaining > 0) {
+    // Generate distinct random variance weights
+    const randWeights = Array.from({ length: targetRuns }, (_, i) => {
+      const pos = i / Math.max(1, targetRuns - 1);
+      const wave = Math.sin(pos * Math.PI) * 0.8 + 0.6; // gentle natural curve
+      const noise = 0.4 + Math.random() * 1.2;          // natural noise
+      return Math.max(0.1, wave * noise);
+    });
+    const sumW = randWeights.reduce((a, b) => a + b, 0);
+
+    let distributed = 0;
+    for (let i = 0; i < targetRuns; i++) {
+      const share = Math.floor((remaining * randWeights[i]) / sumW);
+      runQuantities[i] += share;
+      distributed += share;
+    }
+
+    let leftover = remaining - distributed;
+    while (leftover > 0) {
+      const idx = Math.floor(Math.random() * targetRuns);
+      runQuantities[idx] += 1;
+      leftover -= 1;
+    }
+  }
+
+  // PASS: Anti-repetition pass to break any adjacent or repeating identical quantities
+  for (let pass = 0; pass < 5; pass++) {
+    for (let i = 0; i < targetRuns - 1; i++) {
+      if (runQuantities[i] === runQuantities[i + 1]) {
+        if (runQuantities[i] > effectiveMin + 1) {
+          runQuantities[i] -= 1;
+          runQuantities[i + 1] += 1;
+        } else {
+          const donorIdx = runQuantities.findIndex((q, idx) => idx !== i && idx !== i + 1 && q > effectiveMin + 1);
+          if (donorIdx !== -1) {
+            runQuantities[donorIdx] -= 1;
+            runQuantities[i] += 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Final check: sum === total without any run dropping below effectiveMin
+  let currentSum = runQuantities.reduce((a, b) => a + b, 0);
+  if (currentSum !== total) {
+    let diff = total - currentSum;
+    for (let i = 0; i < runQuantities.length && diff !== 0; i++) {
+      if (diff > 0) {
+        runQuantities[i] += 1;
+        diff -= 1;
+      } else if (diff < 0 && runQuantities[i] > effectiveMin) {
+        runQuantities[i] -= 1;
+        diff += 1;
+      }
+    }
+  }
+
+  return runQuantities;
+}
+
 export function coordinateEngagementSchedules(
   schedules: FullOrganicConfig[],
   minimums: Record<string, number | undefined> = {},
@@ -85,56 +178,20 @@ export function coordinateEngagementSchedules(
 
     // Generate random varying runs across all engagement types (shares, saves, reposts, comments, likes)
     // Every run is >= min (never below provider/user minimum) and has natural random variations
-    const maxPossibleRuns = Math.floor(total / min);
-    if (maxPossibleRuns <= 1) {
-      sizes.push({ slot: Math.floor(Math.random() * slotCount), qty: total });
-    } else {
-      const targetRuns = Math.max(2, Math.min(slotCount, maxPossibleRuns));
-      
-      // Base allocation of min to each run
-      const runQuantities = new Array(targetRuns).fill(min);
-      let remaining = total - (targetRuns * min);
+    const runQuantities = generateRandomVaryingRuns(total, min, slotCount);
+    const targetRuns = runQuantities.length;
 
-      if (remaining > 0) {
-        // Generate random variance weights for each run (natural random variations)
-        const randWeights = Array.from({ length: targetRuns }, () => 0.35 + Math.random() * 1.5);
-        const sumRW = randWeights.reduce((a, b) => a + b, 0);
+    // Pick which Views slots carry these reaction runs
+    const chosenSlots = [...Array(slotCount).keys()]
+      .map((slot) => ({ slot, key: Math.pow(Math.random(), meanW / Math.max(1, weights[slot])) }))
+      .sort((a, b) => b.key - a.key)
+      .slice(0, targetRuns)
+      .map((x) => x.slot)
+      .sort((a, b) => a - b);
 
-        let distributed = 0;
-        for (let i = 0; i < targetRuns; i++) {
-          const share = Math.floor((remaining * randWeights[i]) / sumRW);
-          runQuantities[i] += share;
-          distributed += share;
-        }
-
-        let leftover = remaining - distributed;
-        while (leftover > 0) {
-          const idx = Math.floor(Math.random() * targetRuns);
-          runQuantities[idx] += 1;
-          leftover -= 1;
-        }
-      }
-
-      // Jitter adjacent identical runs so every run has different numbers where possible
-      for (let i = 0; i < targetRuns - 1; i++) {
-        if (runQuantities[i] === runQuantities[i + 1] && runQuantities[i] > min) {
-          runQuantities[i] -= 1;
-          runQuantities[i + 1] += 1;
-        }
-      }
-
-      // Pick which Views slots carry these reaction runs
-      const chosenSlots = [...Array(slotCount).keys()]
-        .map((slot) => ({ slot, key: Math.pow(Math.random(), meanW / Math.max(1, weights[slot])) }))
-        .sort((a, b) => b.key - a.key)
-        .slice(0, targetRuns)
-        .map((x) => x.slot)
-        .sort((a, b) => a - b);
-
-      runQuantities.forEach((qty, i) => {
-        sizes.push({ slot: chosenSlots[i] ?? (i % slotCount), qty });
-      });
-    }
+    runQuantities.forEach((qty, i) => {
+      sizes.push({ slot: chosenSlots[i] ?? (i % slotCount), qty });
+    });
 
     // 4) Time each run after its Views run and before the next one.
     const template = schedule.runs[0];
@@ -186,12 +243,12 @@ export function coordinateEngagementSchedules(
 // Provider minimum order quantity FALLBACKS (actual values come from service table via minQuantity prop)
 // These are last-resort defaults only — real min comes from DB service.min_quantity
 export const PROVIDER_MINIMUMS: Record<string, number> = {
-  views: 100,
-  likes: 1,
+  views: 101,
+  likes: 2,
   comments: 1,
   reposts: 1,
   saves: 10,
-  shares: 10,
+  shares: 2,
 };
 
 // Provider maximum order quantity

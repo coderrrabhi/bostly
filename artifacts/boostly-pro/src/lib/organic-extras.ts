@@ -244,6 +244,26 @@ export function normalizeRunTotals<T extends { quantity_to_send: number; base_qu
     list[last].quantity_to_send -= diff;
     list[last].base_quantity = list[last].quantity_to_send;
   }
+
+  // Anti-repeat pass to ensure runs have varying numbers
+  for (let pass = 0; pass < 3; pass++) {
+    for (let i = 0; i < list.length - 1; i++) {
+      if (list[i].quantity_to_send === list[i + 1].quantity_to_send) {
+        if (list[i].quantity_to_send > min + 1) {
+          list[i].quantity_to_send -= 1;
+          list[i + 1].quantity_to_send += 1;
+        } else {
+          const donor = list.find((x, idx) => idx !== i && idx !== i + 1 && x.quantity_to_send > min + 1);
+          if (donor) {
+            donor.quantity_to_send -= 1;
+            list[i].quantity_to_send += 1;
+          }
+        }
+      }
+    }
+  }
+  list.forEach(r => { r.base_quantity = r.quantity_to_send; });
+
   return list;
 }
 
