@@ -128,7 +128,8 @@ async function claimRun(): Promise<any | null> {
         RETURNING rs.*
      )
      SELECT claimed.*,eoi.provider_mappings,eoi.user_provider_account_id,
-            eoi.engagement_type,eo.link,eo.id AS engagement_order_id,eo.user_id
+            eoi.engagement_type,eo.link,eo.id AS engagement_order_id,eo.user_id,
+            COALESCE(claimed.custom_comments, eoi.custom_comments) AS comments_text
        FROM claimed
        JOIN lovable_legacy.engagement_order_items eoi ON eoi.id=claimed.engagement_order_item_id
        JOIN lovable_legacy.engagement_orders eo ON eo.id=eoi.engagement_order_id`,
@@ -246,8 +247,10 @@ async function dispatch(run: any): Promise<void> {
         link: run.link,
         quantity: String(run.quantity_to_send),
       });
-      if (run.custom_comments && typeof run.custom_comments === "string" && run.custom_comments.trim()) {
-        params.set("comments", run.custom_comments.trim());
+      if (run.comments_text && String(run.comments_text).trim()) {
+        const lines = String(run.comments_text).split(/\r?\n/).map((c) => c.trim()).filter(Boolean);
+        params.set("comments", lines.join("\n"));
+        params.set("quantity", String(lines.length));
       }
       response = await fetch(safePanelUrl(account.api_url), {
         method: "POST",
@@ -542,14 +545,13 @@ async function checkerTick(): Promise<void> {
   }
 }
 
-/** Kick the executor now (e.g. right after an order is placed). Safe to call often. */
-export function triggerRotationExecutor(): void {
-  setTimeout(() => void executorTick(), 250);
+/** Run one executor pass immediately (e.g. right after a new order is placed). */
+export function kickRotationExecutor(): void {
+  void executorTick();
 }
 
 export function startMultiProviderRotationWorkers(): void {
   void Promise.all([executorTick(), checkerTick()]);
-  // Check for due runs every 15 s so delivery starts at the chosen time, not up to a minute late.
-  setInterval(() => void executorTick(), 15_000).unref();
+  setInterval(() => void executorTick(), 60_000).unref();
   setInterval(() => void checkerTick(), 60_000).unref();
 }

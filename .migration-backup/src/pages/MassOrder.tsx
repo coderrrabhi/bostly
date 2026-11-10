@@ -17,7 +17,7 @@ import { CurveSparkline } from '@/components/engagement/CurveSparkline';
 import { MIN_VARIANCE_PERCENT, applyCurveStyle, curveStyleFor, minOrderFor, normalizeRunTotals, newCurveSeed, qtyFromPercent, randomRatioPercent, randomViewsInRange, withSeed } from '@/lib/organic-extras';
 import { toast } from 'sonner';
 import { NoBundleBanner } from '@/components/NoBundleBanner';
-import { coordinateEngagementSchedules, generateOrganicSchedule } from '@/lib/organic-algorithm';
+import { coordinateEngagementSchedules, generateOrganicSchedule, generateRandomVaryingRuns } from '@/lib/organic-algorithm';
 
 interface Row {
   id: string;
@@ -375,8 +375,25 @@ export default function MassOrder() {
               .filter((mapping: any) => mapping.enabled && mapping.provider_service_id)
               .sort((a: any, b: any) => (a.priority ?? 999) - (b.priority ?? 999));
             const priceK = serviceMap[t]?.price ?? 0;
-            const runs = (r.runs[t] ?? []).filter((run) => run.quantity_to_send > 0);
-            const runsTotal = runs.reduce((sum, run) => sum + run.quantity_to_send, 0);
+            let runs = (r.runs[t] ?? []).filter((run) => run.quantity_to_send > 0);
+            let runsTotal = runs.reduce((sum, run) => sum + run.quantity_to_send, 0);
+            if ((runsTotal !== q || runs.length === 0) && q > 0) {
+              const effectiveMin = effectiveMins[t] || 1;
+              const maxSlots = Math.min(10, Math.max(2, Math.floor(q / effectiveMin)));
+              const qtys = generateRandomVaryingRuns(q, effectiveMin, maxSlots);
+              const baseTime = Date.now() + 5 * 60_000;
+              const totalDur = hours * 60 * 60_000;
+              const gap = qtys.length > 1 ? totalDur / (qtys.length - 1) : 30 * 60_000;
+              runs = qtys.map((qty, i) => ({
+                run_number: i + 1,
+                scheduled_at: new Date(baseTime + i * gap).toISOString(),
+                quantity_to_send: qty,
+                base_quantity: qty,
+                variance_applied: 0,
+                peak_multiplier: 1,
+              }));
+              runsTotal = q;
+            }
             return {
               type: t,
               quantity: q,

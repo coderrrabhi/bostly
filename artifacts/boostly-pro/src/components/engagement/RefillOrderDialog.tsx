@@ -201,7 +201,9 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
               provider_service_id: String(m.provider_service_id),
               priority: m.priority ?? 1,
             })),
-            custom_comments: p.customCommentsToUse || p.item.custom_comments || undefined,
+            custom_comments: (p.customCommentsToUse && p.customCommentsToUse.length > 0)
+              ? p.customCommentsToUse.join("\n")
+              : (typeof p.item.custom_comments === 'string' ? p.item.custom_comments : undefined),
             variance_percent: 50,
             scheduled_runs: runs.map((r) => ({
               scheduled_at: r.scheduled_at,

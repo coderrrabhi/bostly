@@ -2,7 +2,7 @@
 // Converts user-drawn control points into delivery runs
 
 import { EngagementType, ENGAGEMENT_CONFIG } from './engagement-types';
-import { PROVIDER_MINIMUMS } from './organic-algorithm';
+import { PROVIDER_MINIMUMS, generateRandomVaryingRuns } from './organic-algorithm';
 
 export interface ControlPoint {
   id: string;
@@ -118,6 +118,22 @@ export function curveToSchedule(
       quantity: totalQuantity,
       cumulativeQuantity: totalQuantity,
     }];
+  }
+
+  // Small-quantity organic mode: guaranteed run-wise distribution with 0 negatives
+  if (totalQuantity >= 2 && totalQuantity < providerMin * 25) {
+    const runQuantities = generateRandomVaryingRuns(totalQuantity, providerMin, Math.min(8, Math.floor(totalQuantity / providerMin)));
+    const count = runQuantities.length;
+    let cum = 0;
+    return runQuantities.map((qty, i) => {
+      cum += qty;
+      return {
+        runNumber: i + 1,
+        timePercent: Math.round(((i + 1) / (count + 1)) * 100),
+        quantity: qty,
+        cumulativeQuantity: cum,
+      };
+    });
   }
   
   // AI decides optimal number of runs based on quantity and type

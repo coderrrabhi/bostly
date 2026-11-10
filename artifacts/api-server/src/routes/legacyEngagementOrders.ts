@@ -1,4 +1,4 @@
-import { pool } from "@workspace/db";
+import { pool } from "../db";
 import { Router, type IRouter } from "express";
 import { z } from "zod";
 import { requireAuth, type AuthenticatedRequest } from "../middlewares/auth";
@@ -6,6 +6,82 @@ import { resolveLegacyId } from "../lib/identity";
 
 const router: IRouter = Router();
 router.use(requireAuth);
+
+function generateRandomVaryingRunsServer(total: number, min: number, maxSlots: number): number[] {
+  if (total <= 0) return [];
+  const effectiveMin = Math.max(1, min);
+  if (total <= effectiveMin) return [total];
+
+  const absoluteMaxRuns = Math.floor(total / effectiveMin);
+  if (absoluteMaxRuns <= 1) return [total];
+
+  const idealRuns = Math.max(2, Math.floor(total / (effectiveMin * 1.35)));
+  let targetRuns = Math.max(2, Math.min(maxSlots, absoluteMaxRuns, idealRuns));
+
+  if (targetRuns > 2 && targetRuns * effectiveMin === total) {
+    targetRuns = targetRuns - 1;
+  }
+
+  const runQuantities = new Array(targetRuns).fill(effectiveMin);
+  let remaining = total - (targetRuns * effectiveMin);
+
+  if (remaining > 0) {
+    const randWeights = Array.from({ length: targetRuns }, (_, i) => {
+      const pos = i / Math.max(1, targetRuns - 1);
+      const wave = Math.sin(pos * Math.PI) * 0.8 + 0.6;
+      const noise = 0.4 + Math.random() * 1.2;
+      return Math.max(0.1, wave * noise);
+    });
+    const sumW = randWeights.reduce((a, b) => a + b, 0);
+
+    let distributed = 0;
+    for (let i = 0; i < targetRuns; i++) {
+      const share = Math.floor((remaining * randWeights[i]) / sumW);
+      runQuantities[i] += share;
+      distributed += share;
+    }
+
+    let leftover = remaining - distributed;
+    while (leftover > 0) {
+      const idx = Math.floor(Math.random() * targetRuns);
+      runQuantities[idx] += 1;
+      leftover -= 1;
+    }
+  }
+
+  for (let pass = 0; pass < 5; pass++) {
+    for (let i = 0; i < targetRuns - 1; i++) {
+      if (runQuantities[i] === runQuantities[i + 1]) {
+        if (runQuantities[i] > effectiveMin + 1) {
+          runQuantities[i] -= 1;
+          runQuantities[i + 1] += 1;
+        } else {
+          const donorIdx = runQuantities.findIndex((q, idx) => idx !== i && idx !== i + 1 && q > effectiveMin + 1);
+          if (donorIdx !== -1) {
+            runQuantities[donorIdx] -= 1;
+            runQuantities[i] += 1;
+          }
+        }
+      }
+    }
+  }
+
+  let currentSum = runQuantities.reduce((a, b) => a + b, 0);
+  if (currentSum !== total) {
+    let diff = total - currentSum;
+    for (let i = 0; i < runQuantities.length && diff !== 0; i++) {
+      if (diff > 0) {
+        runQuantities[i] += 1;
+        diff -= 1;
+      } else if (diff < 0 && runQuantities[i] > effectiveMin) {
+        runQuantities[i] -= 1;
+        diff += 1;
+      }
+    }
+  }
+
+  return runQuantities;
+}
 
 const scheduledRunSchema = z.object({
   scheduled_at: z.string().datetime(),
@@ -15,6 +91,7 @@ const scheduledRunSchema = z.object({
   base_quantity: z.coerce.number().int().nonnegative().optional(),
   variance_applied: z.coerce.number().int().optional(),
   peak_multiplier: z.coerce.number().nonnegative().optional(),
+  custom_comments: z.string().optional(),
 });
 
 const providerMappingSchema = z.object({
@@ -30,6 +107,7 @@ const engagementSchema = z.object({
   user_bundle_item_id: z.string().uuid().nullable().optional(),
   provider_mappings: z.array(providerMappingSchema).min(1),
   scheduled_runs: z.array(scheduledRunSchema).optional(),
+  custom_comments: z.string().optional(),
 });
 
 const orderSchema = z.object({
@@ -124,18 +202,32 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       const providerMax = services.length
         ? Math.max(...services.map((row) => Number(row.max_quantity) || 0))
         : 0;
-      // Drop zero-quantity runs (variance/rounding can produce them). If any are
-      // removed, redistribute the lost quantity onto the last remaining run so the
-      // scheduled total still matches engagement.quantity.
-      const rawRuns = engagement.scheduled_runs?.length
-        ? engagement.scheduled_runs
-        : [{
-            scheduled_at: new Date(Date.now() + 5 * 60_000).toISOString(),
-            quantity_to_send: engagement.quantity,
-            base_quantity: engagement.quantity,
-            variance_applied: 0,
-            peak_multiplier: 1,
-          }];
+      // Build runs: if scheduled_runs is empty, or collapsed to 1 run while quantity allows multiple runs,
+      // generate multiple organic runs distributed run-wise!
+      let inputRuns = (engagement.scheduled_runs?.length ? engagement.scheduled_runs : []).filter(r => r.quantity_to_send > 0);
+      if (inputRuns.length === 0 || (inputRuns.length === 1 && engagement.quantity >= providerMin * 2)) {
+        const effectiveMin = Math.max(1, providerMin);
+        const maxSlots = Math.min(10, Math.max(2, Math.floor(engagement.quantity / effectiveMin)));
+        const qtys = generateRandomVaryingRunsServer(engagement.quantity, effectiveMin, maxSlots);
+        const startTime = Date.now() + 5 * 60_000;
+        const totalDurationMs = Math.min(24, Math.max(2, Math.ceil(engagement.quantity / (effectiveMin * 2)))) * 60 * 60_000;
+        const intervalMs = qtys.length > 1 ? totalDurationMs / (qtys.length - 1) : 30 * 60_000;
+
+        inputRuns = qtys.map((qty, idx) => ({
+          scheduled_at: new Date(startTime + idx * intervalMs + Math.round((Math.random() - 0.5) * intervalMs * 0.25)).toISOString(),
+          quantity_to_send: qty,
+          base_quantity: qty,
+          variance_applied: 0,
+          peak_multiplier: 1,
+        }));
+      }
+      const rawRuns = inputRuns.length > 0 ? inputRuns : [{
+        scheduled_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+        quantity_to_send: engagement.quantity,
+        base_quantity: engagement.quantity,
+        variance_applied: 0,
+        peak_multiplier: 1,
+      }];
       const nonZeroRuns = rawRuns.filter((r) => r.quantity_to_send > 0);
       const lostQty = rawRuns.reduce((s, r) => s + r.quantity_to_send, 0)
                     - nonZeroRuns.reduce((s, r) => s + r.quantity_to_send, 0);
@@ -195,27 +287,43 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       const itemResult = await client.query(
         `INSERT INTO lovable_legacy.engagement_order_items
            (engagement_order_id,engagement_type,user_service_id,user_provider_account_id,
-            user_bundle_item_id,provider_mappings,quantity,price,status)
-         VALUES ($1::uuid,$2,$3::uuid,$4::uuid,$5::uuid,$6::jsonb,$7,$8,'pending')
+            user_bundle_item_id,provider_mappings,quantity,price,status,custom_comments)
+         VALUES ($1::uuid,$2,$3::uuid,$4::uuid,$5::uuid,$6::jsonb,$7,$8,'pending',$9)
          RETURNING id`,
         [
           order.id, item.engagement.type, item.userServiceId, item.providerAccountId,
           item.bundleItemId, JSON.stringify(item.mappings), item.engagement.quantity, item.price,
+          item.engagement.custom_comments ?? null,
         ],
       );
       const itemId = itemResult.rows[0].id;
       const runs = item.engagement.scheduled_runs ?? [];
+      const commentLines = (item.engagement.custom_comments ?? '')
+        .split(/\r?\n/)
+        .map((c: string) => c.trim())
+        .filter(Boolean);
+      let commentOffset = 0;
+
       for (let index = 0; index < runs.length; index += 1) {
         const run = runs[index];
+        let runComments: string | null = null;
+        if (commentLines.length > 0) {
+          const runQty = run.quantity_to_send;
+          const slice = commentLines.slice(commentOffset, commentOffset + runQty);
+          commentOffset += runQty;
+          if (slice.length > 0) {
+            runComments = slice.join("\n");
+          }
+        }
         await client.query(
           `INSERT INTO lovable_legacy.organic_run_schedule
              (order_id,engagement_order_item_id,run_number,scheduled_at,quantity_to_send,
-              base_quantity,variance_applied,peak_multiplier,status)
-           VALUES ($1::uuid,$2::uuid,$3,$4::timestamptz,$5,$6,$7,$8,'pending')`,
+              base_quantity,variance_applied,peak_multiplier,status,custom_comments)
+           VALUES ($1::uuid,$2::uuid,$3,$4::timestamptz,$5,$6,$7,$8,'pending',$9)`,
           [
             order.id, itemId, index + 1, run.scheduled_at, run.quantity_to_send,
             run.base_quantity ?? run.quantity_to_send, run.variance_applied ?? 0,
-            run.peak_multiplier ?? 1,
+            run.peak_multiplier ?? 1, runComments,
           ],
         );
       }

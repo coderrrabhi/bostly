@@ -40,7 +40,7 @@ import { Loader2, Rocket, Link as LinkIcon, Brain, Percent, HelpCircle, ArrowDow
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import { useDebounce } from "@/hooks/useDebounce";
-import { FullOrganicConfig } from "@/lib/organic-algorithm";
+import { FullOrganicConfig, generateRandomVaryingRuns } from "@/lib/organic-algorithm";
 import { Textarea } from "@/components/ui/textarea";
 import { MIN_VARIANCE_PERCENT, minOrderFor, normalizeRunTotals, randomRatioPercent, US_PEAK_LABEL, curveStyleFor } from "@/lib/organic-extras";
 import { Flame, MessageSquare } from "lucide-react";
@@ -725,19 +725,29 @@ export default function EngagementOrder() {
                 ...run,
                 run_number: index + 1,
               }));
-              // Only reuse the preview if it was built for this exact quantity (not stale);
-              // then drop zero/negative runs while keeping the exact total.
-              const rawTotal = rawRuns.reduce((s, r) => s + (r.quantity_to_send ?? 0), 0);
-              const filteredRuns = rawTotal === config.quantity
+              let filteredRuns = rawRuns.length > 0
                 ? normalizeRunTotals(rawRuns, config.quantity, config.minQuantity ?? 1)
                 : [];
-              // Final safety check: only use the schedule if it sums exactly to the
-              // order quantity. Any mismatch means the schedule is stale.
               const filteredTotal = filteredRuns.reduce((s, r) => s + r.quantity_to_send, 0);
-              const scheduledRuns =
-                filteredRuns.length > 0 && filteredTotal === config.quantity
-                  ? filteredRuns
-                  : undefined;
+
+              if (filteredRuns.length === 0 || filteredTotal !== config.quantity) {
+                const effectiveMin = Math.max(1, config.minQuantity ?? 1);
+                const maxSlots = Math.min(10, Math.max(2, Math.floor(config.quantity / effectiveMin)));
+                const qtys = generateRandomVaryingRuns(config.quantity, effectiveMin, maxSlots);
+                const baseTime = Date.now() + 5 * 60_000;
+                const totalDur = (effectiveTimeLimit || 4) * 60 * 60_000;
+                const gap = qtys.length > 1 ? totalDur / (qtys.length - 1) : 30 * 60_000;
+                filteredRuns = qtys.map((qty, i) => ({
+                  run_number: i + 1,
+                  scheduled_at: new Date(baseTime + i * gap).toISOString(),
+                  quantity_to_send: qty,
+                  base_quantity: qty,
+                  variance_applied: 0,
+                  peak_multiplier: 1,
+                }));
+              }
+
+              const scheduledRuns = filteredRuns;
 
               return {
                 type,

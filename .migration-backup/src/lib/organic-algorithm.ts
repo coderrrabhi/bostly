@@ -681,59 +681,19 @@ export function generateOrganicSchedule(
   // For totals up to 25x the provider minimum, we use a denser splitting logic
   const shouldSmallQuantitySplit = maxRunsByMin >= 2 && totalQuantity < providerMin * 25;
   if (shouldSmallQuantitySplit) {
-    // Distribute across 2-8 runs naturally, but leave "quantity budget" for variety
-    const numRuns = Math.max(2, Math.min(8, Math.floor(maxRunsByMin * 0.7)));
-    let remainingForSmall = totalQuantity;
+    // Generate random varying runs: each >= providerMin, sum === totalQuantity, naturally varied
+    const runQuantities = generateRandomVaryingRuns(totalQuantity, providerMin, Math.min(8, maxRunsByMin));
+    const numRuns = runQuantities.length;
 
-    const istOffset = 5.5 * 60 * 60 * 1000;
+    const istOffset = usPeakOffsetMs();
 
     // Interval based on time limit or type defaults
     const targetIntervalMinutes = timeLimitHours && timeLimitHours > 0
-      ? (timeLimitHours * 60 * 0.8) / (numRuns - 1)
+      ? (timeLimitHours * 60 * 0.8) / Math.max(1, numRuns - 1)
       : typeInterval.min + Math.random() * (typeInterval.max - typeInterval.min);
 
     for (let i = 0; i < numRuns; i++) {
-      const runsLeft = numRuns - i;
-      const minNeededAfter = (runsLeft - 1) * providerMin;
-
-      let batchQty: number;
-      if (i === numRuns - 1) {
-        batchQty = remainingForSmall; // remainder
-      } else {
-        const minAllowed = providerMin;
-        const maxAllowed = remainingForSmall - minNeededAfter;
-
-        // Pick a slightly-randomized "ideal" size but clamp to legal range
-        const ideal = Math.round((remainingForSmall / runsLeft) * (0.6 + Math.random() * 0.8));
-        batchQty = Math.max(minAllowed, Math.min(ideal, maxAllowed));
-
-        // ULTRA-STRICT ANTI-REPEAT: Never use same quantity twice in one schedule for small orders
-        if (runs.length > 0) {
-          const usedQuantities = runs.map(r => r.quantity);
-          let attempts = 0;
-          const primeJitters = [1, 2, 3, 5, 7];
-
-          while (usedQuantities.includes(batchQty) && attempts < 15 && maxAllowed > minAllowed) {
-            const nudge = primeJitters[attempts % primeJitters.length];
-            const nextUp = batchQty + nudge;
-            const nextDown = batchQty - nudge;
-
-            if (nextUp <= maxAllowed && !usedQuantities.includes(nextUp)) {
-              batchQty = nextUp;
-              break;
-            } else if (nextDown >= minAllowed && !usedQuantities.includes(nextDown)) {
-              batchQty = nextDown;
-              break;
-            }
-            attempts++;
-          }
-        }
-        // Final Anti-Round: ensure no round multiples of 5/10 if range allows
-        if (batchQty % 5 === 0 && batchQty > minAllowed) {
-          if (batchQty + 1 <= maxAllowed) batchQty += 1;
-          else if (batchQty - 1 >= minAllowed) batchQty -= 1;
-        }
-      }
+      const batchQty = runQuantities[i];
 
       // Schedule time with jitter
       let scheduleTime: Date;
@@ -742,8 +702,8 @@ export function generateOrganicSchedule(
         scheduleTime = new Date(startTime.getTime() + initialDelay);
       } else {
         const prevTime = runs[runs.length - 1].scheduledAt;
-        const intervalMs = targetIntervalMinutes * 60 * 1000;
-        const jitterMs = (Math.random() - 0.5) * intervalMs * 0.6; // ±30% jitter
+        const intervalMs = Math.max(60_000, targetIntervalMinutes * 60 * 1000);
+        const jitterMs = (Math.random() - 0.5) * intervalMs * 0.4;
         scheduleTime = new Date(prevTime.getTime() + intervalMs + jitterMs);
       }
 
@@ -762,25 +722,20 @@ export function generateOrganicSchedule(
         humanBehaviorScore: 70 + Math.floor(Math.random() * 20),
         patternBreaker: false,
       });
-
-      remainingForSmall -= batchQty;
-      if (remainingForSmall <= 0) break;
     }
 
-    const finalizedRuns = finalizeUniqueRuns(runs, totalQuantity, providerMin, Math.max(providerMin + numRuns + 10, typeRunSize.max));
-
-    const totalDurationSmall = finalizedRuns.length > 1
-      ? finalizedRuns[finalizedRuns.length - 1].scheduledAt.getTime() - finalizedRuns[0].scheduledAt.getTime()
+    const totalDurationSmall = runs.length > 1
+      ? runs[runs.length - 1].scheduledAt.getTime() - runs[0].scheduledAt.getTime()
       : 0;
 
     return {
       engagementType,
       totalQuantity,
-      runs: finalizedRuns,
+      runs,
       totalDuration: totalDurationSmall,
       warnings,
       patternBreakCount: 0,
-      avgHumanScore: Math.round(finalizedRuns.reduce((s, r) => s + r.humanBehaviorScore, 0) / finalizedRuns.length),
+      avgHumanScore: Math.round(runs.reduce((s, r) => s + r.humanBehaviorScore, 0) / runs.length),
       varietyIndex: 45,
     };
   }
