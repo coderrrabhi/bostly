@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { workerPool as pool } from "../db";
 import { decryptProviderCredential } from "../lib/providerCredentials";
 import { logger } from "../lib/logger";
+import { commentRetryMinutes, isCommentEngagement, runCommentText } from "../lib/commentDelivery";
 
 type Mapping = {
   user_provider_account_id: string;
@@ -129,7 +130,11 @@ async function claimRun(): Promise<any | null> {
      )
      SELECT claimed.*,eoi.provider_mappings,eoi.user_provider_account_id,
             eoi.engagement_type,eo.link,eo.id AS engagement_order_id,eo.user_id,
-            COALESCE(claimed.custom_comments, eoi.custom_comments) AS comments_text
+            eoi.custom_comments AS item_comments,
+            (SELECT COALESCE(SUM(previous.quantity_to_send),0)
+               FROM lovable_legacy.organic_run_schedule previous
+              WHERE previous.engagement_order_item_id=claimed.engagement_order_item_id
+                AND previous.run_number<claimed.run_number) AS comment_offset
        FROM claimed
        JOIN lovable_legacy.engagement_order_items eoi ON eoi.id=claimed.engagement_order_item_id
        JOIN lovable_legacy.engagement_orders eo ON eo.id=eoi.engagement_order_id`,
@@ -161,6 +166,8 @@ async function releaseAttempt(runId: string): Promise<void> {
 }
 
 async function dispatch(run: any): Promise<void> {
+  // Validate before taking a provider lock or making any paid request.
+  const comments = runCommentText(run);
   const mappings = (Array.isArray(run.provider_mappings) ? run.provider_mappings : []) as Mapping[];
   const accounts = await loadAccounts(mappings);
   const ordered = mappings
@@ -218,6 +225,7 @@ async function dispatch(run: any): Promise<void> {
       service: mapping.provider_service_id,
       link: run.link,
       quantity: run.quantity_to_send,
+      ...(comments ? { comments } : {}),
     };
 
     let key: string;
@@ -239,6 +247,7 @@ async function dispatch(run: any): Promise<void> {
     }
 
     let response: Response;
+    let text: string;
     try {
       const params = new URLSearchParams({
         key,
@@ -247,17 +256,28 @@ async function dispatch(run: any): Promise<void> {
         link: run.link,
         quantity: String(run.quantity_to_send),
       });
-      if (run.comments_text && String(run.comments_text).trim()) {
-        const lines = String(run.comments_text).split(/\r?\n/).map((c) => c.trim()).filter(Boolean);
-        params.set("comments", lines.join("\n"));
-        params.set("quantity", String(lines.length));
+      if (comments) {
+        params.set("comments", comments);
       }
-      response = await fetch(safePanelUrl(account.api_url), {
+      const apiUrl = safePanelUrl(account.api_url);
+      // A crash after sending an add request must not cause a duplicate paid
+      // comment order when the stale-claim recovery runs after restart.
+      if (comments) {
+        const ready = await pool.query(
+          `UPDATE lovable_legacy.organic_run_schedule SET dispatch_uncertain=true,updated_at=now()
+            WHERE id=$1::uuid AND status='dispatching' AND claim_token=$2::uuid RETURNING id`,
+          [run.id, run.claim_token],
+        );
+        if (!ready.rows[0]) return;
+      }
+      response = await fetch(apiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "BoostlyPro/1.0 (+api)" },
         body: params,
         signal: AbortSignal.timeout(12_000),
       });
+      // Read the response inside the same uncertainty boundary as fetch.
+      text = await response.text();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Provider request failed.";
       await pool.query(
@@ -271,16 +291,37 @@ async function dispatch(run: any): Promise<void> {
       return;
     }
 
-    const text = await response.text();
     let body: any;
     try {
       body = JSON.parse(text);
     } catch {
+      if (comments) {
+        await pool.query(
+          `UPDATE lovable_legacy.organic_run_schedule SET status='dispatch_uncertain',
+              dispatch_uncertain=true,error_message=$1,updated_at=now() WHERE id=$2::uuid`,
+          [`Provider returned HTTP ${response.status} without a readable order confirmation; verify before resending.`, run.id],
+        );
+        await audit(run, "dispatch_uncertain", account, { request: requestPayload, error: "Unreadable provider response." });
+        return;
+      }
       body = { error: `Provider returned HTTP ${response.status} without JSON.` };
     }
     const providerOrderId = body?.order ?? body?.order_id ?? body?.id;
 
     if (!response.ok || body?.error || !providerOrderId) {
+      if (comments && !body?.error) {
+        await pool.query(
+          `UPDATE lovable_legacy.organic_run_schedule SET status='dispatch_uncertain',
+              dispatch_uncertain=true,error_message='Provider confirmation missing; verify before resending.',updated_at=now()
+            WHERE id=$1::uuid`, [run.id],
+        );
+        await audit(run, "dispatch_uncertain", account, { request: requestPayload, response: body });
+        return;
+      }
+      // An explicit rejection confirms no order was accepted, so failover is safe.
+      if (comments) await pool.query(
+        `UPDATE lovable_legacy.organic_run_schedule SET dispatch_uncertain=false WHERE id=$1::uuid`, [run.id],
+      );
       const message = String(body?.error ?? "Provider did not return an order ID.");
       failures.push(`${account.name}: ${message}`);
       await audit(run, isBusyMessage(message) ? "provider_busy_response" : "provider_rejected", account, {
@@ -349,6 +390,21 @@ async function processNextRun(): Promise<boolean> {
     await dispatch(run);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Provider dispatch failed.";
+    if (isCommentEngagement(run.engagement_type)) {
+      const result = await pool.query(
+        `UPDATE lovable_legacy.organic_run_schedule
+            SET status=CASE WHEN COALESCE(dispatch_uncertain,false) THEN 'dispatch_uncertain' ELSE 'pending' END,
+                rotation_lock_key=CASE WHEN COALESCE(dispatch_uncertain,false) THEN rotation_lock_key ELSE NULL END,
+                claim_token=NULL,claimed_at=NULL,error_message=$1,retry_count=retry_count+1,
+                scheduled_at=now()+($3 * interval '1 minute'),completed_at=NULL,updated_at=now()
+          WHERE id=$2::uuid AND status='dispatching' AND provider_order_id IS NULL RETURNING status`,
+        [message, run.id, commentRetryMinutes(Number(run.retry_count ?? 0))],
+      );
+      if (result.rows[0]) await audit(run, result.rows[0].status === "pending" ? "comment_requeued" : "dispatch_uncertain",
+        undefined, { error: message });
+      logger.warn({ runId: run.id, err: message }, "Comment run retained for retry or provider confirmation");
+      return true;
+    }
     await pool.query(
       `UPDATE lovable_legacy.organic_run_schedule
           SET status='failed',rotation_lock_key=NULL,claim_token=NULL,error_message=$1,
@@ -366,6 +422,12 @@ async function executorTick(): Promise<void> {
   if (executorRunning) return;
   executorRunning = true;
   try {
+    await pool.query(
+      `UPDATE lovable_legacy.organic_run_schedule SET status='dispatch_uncertain',
+          error_message='Comment dispatch interrupted; verify provider acceptance before resending.',updated_at=now()
+        WHERE status='dispatching' AND provider_order_id IS NULL
+          AND dispatch_uncertain=true AND claimed_at<now()-interval '2 minutes'`,
+    );
     await pool.query(
       `UPDATE lovable_legacy.organic_run_schedule
           SET status='pending',claim_token=NULL,claimed_at=NULL,rotation_lock_key=NULL,

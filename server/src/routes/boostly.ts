@@ -69,14 +69,14 @@ router.get("/dashboard", async (req, res): Promise<void> => {
                     FILTER (WHERE i.id IS NOT NULL), '[]') AS items
              FROM lovable_legacy.engagement_orders o
              LEFT JOIN lovable_legacy.engagement_order_items i ON i.engagement_order_id = o.id
-            WHERE o.user_id = $1::uuid
+            WHERE o.user_id = $1::uuid AND o.status <> 'deleted'
             GROUP BY o.id, o.order_number, o.status, o.total_price, o.link, o.created_at, o.base_quantity
             ORDER BY o.created_at DESC
             LIMIT 5`,
           [legacyId],
         ),
         pool.query(
-          `SELECT count(*)::int AS total_orders,
+          `SELECT count(*) FILTER (WHERE status <> 'deleted')::int AS total_orders,
                   count(*) FILTER (WHERE status = 'completed')::int AS completed_orders,
                   count(*) FILTER (WHERE status IN ('processing','pending'))::int AS active_orders,
                   COALESCE(sum(total_price), 0)::text AS total_spent

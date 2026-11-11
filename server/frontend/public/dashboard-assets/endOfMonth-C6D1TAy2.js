@@ -1,0 +1,1 @@
+import{l as e}from"./en-US-B08cKhzo.js";function t(t,n){let r=e(t),i=e(n),a=r.getFullYear()-i.getFullYear(),o=r.getMonth()-i.getMonth();return a*12+o}function n(t){let n=e(t),r=n.getMonth();return n.setFullYear(n.getFullYear(),r+1,0),n.setHours(23,59,59,999),n}export{t as n,n as t};

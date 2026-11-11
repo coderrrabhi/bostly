@@ -42,7 +42,8 @@ const requestSchema = z.object({
   })).max(25).default([]),
   order: z.object({ column: z.string(), ascending: z.boolean().default(true) }).optional(),
   limit: z.number().int().min(1).max(500).optional(),
-  range: z.object({ from: z.number().int().min(0), to: z.number().int().min(0).max(999) }).optional(),
+  range: z.object({ from: z.number().int().min(0), to: z.number().int().min(0) })
+    .refine((range) => range.to >= range.from && range.to - range.from < 500, 'Invalid page range').optional(),
   select: z.string().max(4000).optional(),
 });
 
@@ -197,7 +198,7 @@ router.post("/legacy/query", async (req, res): Promise<void> => {
     // Restored pages still compare user_id with the active auth user ID.
     // Translate Clerk IDs to the linked UUID used by the imported database.
     query.filters = query.filters.map((filter) =>
-      filter.column === "user_id" && typeof filter.value === "string" && filter.value.startsWith("user_")
+      filter.column === "user_id" && typeof filter.value === "string" && (filter.value.startsWith("user_") || filter.value === String((req as AuthenticatedRequest).userId))
         ? { ...filter, value: user.legacyId }
         : filter,
     );
