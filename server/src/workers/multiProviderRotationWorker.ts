@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { workerPool as pool } from "../db";
 import { decryptProviderCredential } from "../lib/providerCredentials";
 import { logger } from "../lib/logger";
-import { commentRetryMinutes, isCommentEngagement, runCommentText } from "../lib/commentDelivery";
+import { commentRetryMinutes, isCommentEngagement, runCommentText, shouldRecreateCancelledComment } from "../lib/commentDelivery";
 
 type Mapping = {
   user_provider_account_id: string;
@@ -58,6 +58,53 @@ function normalizeLink(value: string): string {
 function rotationLockKey(run: any, providerAccountId: string): string {
   const linkHash = createHash("sha256").update(normalizeLink(run.link)).digest("hex");
   return `${run.user_id}:${providerAccountId}:${String(run.engagement_type).toLowerCase()}:${linkHash}`;
+}
+
+function isMinimumQuantityMessage(message: string): boolean {
+  const value = message.toLowerCase();
+  return value.includes("less than minimal")
+    || value.includes("minimum quantity")
+    || (value.includes("quantity") && value.includes("minimal"));
+}
+
+/** Add a too-small run's quantity to the next pending run of the same item. */
+async function mergeRunIntoNextRun(run: any): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const next = await client.query(
+      `SELECT id, quantity_to_send FROM lovable_legacy.organic_run_schedule
+        WHERE engagement_order_item_id=$1::uuid AND run_number>$2 AND status='pending'
+          AND provider_order_id IS NULL
+        ORDER BY run_number LIMIT 1 FOR UPDATE`,
+      [run.engagement_order_item_id, run.run_number],
+    );
+    const target = next.rows[0];
+    if (!target) { await client.query("ROLLBACK"); return false; }
+    const mergedQuantity = Number(target.quantity_to_send) + Number(run.quantity_to_send);
+    await client.query(
+      `UPDATE lovable_legacy.organic_run_schedule
+          SET quantity_to_send=$1, base_quantity=$1, updated_at=now() WHERE id=$2::uuid`,
+      [mergedQuantity, target.id],
+    );
+    const closed = await client.query(
+      `UPDATE lovable_legacy.organic_run_schedule
+          SET status='merged', claim_token=NULL, claimed_at=NULL, rotation_lock_key=NULL,
+              user_provider_account_id=NULL, user_provider_account_name=NULL,
+              error_message=$1, completed_at=now(), updated_at=now()
+        WHERE id=$2::uuid AND status='dispatching' AND claim_token=$3::uuid AND provider_order_id IS NULL
+        RETURNING id`,
+      [`Run below every mapped provider's minimum; its quantity was merged into the next run.`, run.id, run.claim_token],
+    );
+    if (!closed.rows[0]) { await client.query("ROLLBACK"); return false; }
+    await client.query("COMMIT");
+    return true;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function isBusyMessage(message: string): boolean {
@@ -351,6 +398,21 @@ async function dispatch(run: any): Promise<void> {
     return;
   }
 
+  // No provider accepted the run and at least one rejected it for being below
+  // its minimum (other mappings often fail too, e.g. "Incorrect service ID").
+  // Rather than failing the run (which strands the order), fold its quantity
+  // into the next pending run of the same item; totals stay exact. Comment
+  // runs keep their retry behavior because their text must match the run
+  // quantity exactly.
+  if (!isCommentEngagement(run.engagement_type) && failures.length > 0
+    && failures.some((failure) => isMinimumQuantityMessage(failure))) {
+    if (await mergeRunIntoNextRun(run)) {
+      await audit(run, "below_minimum_merged", undefined, { error: failures.join(" | ") });
+      logger.info({ runId: run.id }, "Run below every provider minimum; merged into next run");
+      return;
+    }
+  }
+
   if (busyCount > 0) {
     const message = "All active provider accounts are busy for this link and engagement type.";
     await pool.query(
@@ -540,6 +602,26 @@ async function checkRunStatus(run: any): Promise<boolean> {
         String(run.provider_order_id),
       ],
     );
+    if (terminal && shouldRecreateCancelledComment({ engagement_type: run.engagement_type, status,
+      quantity_to_send: Number(run.quantity_to_send), remains: body?.remains, charge: body?.charge,
+      retry_count: run.retry_count })) {
+      // Provider closed the order unpaid with nothing delivered: queue the same
+      // run (same text, same quantity) as a fresh provider order.
+      await pool.query(
+        `UPDATE lovable_legacy.organic_run_schedule
+            SET status='pending',provider_order_id=NULL,provider_status=NULL,provider_remains=NULL,
+                provider_start_count=NULL,provider_charge=NULL,started_at=NULL,completed_at=NULL,
+                claim_token=NULL,claimed_at=NULL,rotation_lock_key=NULL,dispatch_uncertain=false,
+                retry_count=retry_count+1,scheduled_at=now()+($1 * interval '1 minute'),
+                error_message=$2,updated_at=now()
+          WHERE id=$3::uuid AND provider_order_id=$4`,
+        [Math.min(10, commentRetryMinutes(Number(run.retry_count ?? 0))),
+          `Provider cancelled order ${run.provider_order_id} with nothing delivered; recreating.`,
+          run.id, String(run.provider_order_id)],
+      );
+      await audit(run, "comment_recreated", account, { providerOrderId: String(run.provider_order_id), response: body });
+      return true;
+    }
     if (terminal) {
       await audit(run, "status_terminal", account, {
         providerOrderId: String(run.provider_order_id),
@@ -563,10 +645,39 @@ async function checkRunStatus(run: any): Promise<boolean> {
   }
 }
 
+/**
+ * Items and orders never had a completion rollup, so finished orders stayed
+ * "Processing" forever. Mark items completed once all their runs are terminal
+ * with none failed, then complete orders whose items are all resolved.
+ */
+async function rollupFinishedItemsAndOrders(): Promise<void> {
+  await pool.query(
+    `UPDATE lovable_legacy.engagement_order_items i
+        SET status='completed', updated_at=now()
+      WHERE COALESCE(i.status,'pending') IN ('pending','processing')
+        AND NOT EXISTS (SELECT 1 FROM lovable_legacy.organic_run_schedule s
+                         WHERE s.engagement_order_item_id=i.id
+                           AND s.status IN ('pending','dispatching','started','processing','dispatch_uncertain'))
+        AND NOT EXISTS (SELECT 1 FROM lovable_legacy.organic_run_schedule s
+                         WHERE s.engagement_order_item_id=i.id AND s.status='failed')`,
+  );
+  await pool.query(
+    `UPDATE lovable_legacy.engagement_orders o
+        SET status='completed', updated_at=now()
+      WHERE o.status IN ('pending','processing')
+        AND EXISTS (SELECT 1 FROM lovable_legacy.engagement_order_items i
+                     WHERE i.engagement_order_id=o.id AND i.status='completed')
+        AND NOT EXISTS (SELECT 1 FROM lovable_legacy.engagement_order_items i
+                         WHERE i.engagement_order_id=o.id
+                           AND COALESCE(i.status,'pending') IN ('pending','processing'))`,
+  );
+}
+
 async function checkerTick(): Promise<void> {
   if (checkerRunning) return;
   checkerRunning = true;
   try {
+    await rollupFinishedItemsAndOrders();
     const result = await pool.query(
       `WITH candidates AS (
          SELECT rs.id

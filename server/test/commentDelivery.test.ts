@@ -37,4 +37,23 @@ test("rejected comment runs use bounded retries rather than immediate terminal f
   assert.equal(commentRetryMinutes(0), 2);
   assert.equal(commentRetryMinutes(1), 4);
   assert.equal(commentRetryMinutes(10), 60);
+});import { shouldRecreateCancelledComment } from "../src/lib/commentDelivery.ts";
+test("provider-cancelled comment run with nothing delivered is recreated", () => {
+  assert.equal(shouldRecreateCancelledComment({ engagement_type: "comments", status: "Canceled", quantity_to_send: 2, remains: "2", charge: "0.00" }), true);
+  assert.equal(shouldRecreateCancelledComment({ engagement_type: "comments", status: "Refunded", quantity_to_send: 1, remains: "1" }), true);
+});
+test("delivered, partial, non-comment or exhausted runs are not recreated", () => {
+  assert.equal(shouldRecreateCancelledComment({ engagement_type: "comments", status: "Completed", quantity_to_send: 2, remains: 0 }), false);
+  assert.equal(shouldRecreateCancelledComment({ engagement_type: "comments", status: "Canceled", quantity_to_send: 2, remains: 1, charge: "0.01" }), false);
+  assert.equal(shouldRecreateCancelledComment({ engagement_type: "likes", status: "Canceled", quantity_to_send: 2, remains: 2 }), false);
+  assert.equal(shouldRecreateCancelledComment({ engagement_type: "comments", status: "Canceled", quantity_to_send: 2, remains: 2, retry_count: 20 }), false);
+});
+test("partial delivery is never recreated even when the charge reads zero", () => {
+  assert.equal(shouldRecreateCancelledComment({ engagement_type: "comments", status: "Canceled", quantity_to_send: 2, remains: 1, charge: "0.00" }), false);
+  assert.equal(shouldRecreateCancelledComment({ engagement_type: "comments", status: "Canceled", quantity_to_send: 2, remains: "1" }), false);
+});
+test("zero charge recreates only when the panel did not report remains", () => {
+  assert.equal(shouldRecreateCancelledComment({ engagement_type: "comments", status: "Canceled", quantity_to_send: 2, charge: "0.00" }), true);
+  assert.equal(shouldRecreateCancelledComment({ engagement_type: "comments", status: "Canceled", quantity_to_send: 2, remains: null, charge: "0.00" }), true);
+  assert.equal(shouldRecreateCancelledComment({ engagement_type: "comments", status: "Canceled", quantity_to_send: 2 }), false);
 });

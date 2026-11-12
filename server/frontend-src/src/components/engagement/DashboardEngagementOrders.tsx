@@ -20,7 +20,10 @@ export function orderSummary(order: any) {
   const fmt = (m: number) => m < 60 ? `${m} min` : m % 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m / 60}h`;
   const timeframe = mins == null ? null : fmt(mins);
   const left = times.length ? Math.max(0, Math.ceil((Math.max(...times) - Date.now()) / 60000)) : null;
-  const remaining = left == null ? null : order?.status === 'completed' || left === 0 ? 'Done' : order?.status === 'paused' ? `${fmt(left)} (paused)` : fmt(left);
+  // "Done" only when the order itself is complete; a past last-run time with
+  // runs still in flight means delivery is finishing, not done.
+  const remaining = left == null ? null : order?.status === 'completed' ? 'Done'
+    : order?.status === 'paused' ? `${fmt(left)} (paused)` : left === 0 ? 'Finishing…' : fmt(left);
   return { views, timeframe, remaining };
 }
 

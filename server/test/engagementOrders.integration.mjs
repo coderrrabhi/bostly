@@ -10,7 +10,8 @@ globalThis.__dbQuery = async (sql, params) => {
   dbQueries.push({ sql, params });
   if (sql.includes('SELECT id, status')) return { rows: globalThis.__owned };
   if (sql.includes('SELECT id FROM lovable_legacy.user_bundles')) return { rows: [{ id: 'bundle' }] };
-  if (sql.includes('SELECT id FROM lovable_legacy.user_bundle_items')) return { rows: [{ id: 'item' }] };
+  if (sql.includes('r.run_number=1')) return { rows: globalThis.__recentStarts ?? [] };
+  if (sql.includes('FROM lovable_legacy.user_bundle_items')) return { rows: [{ id: 'item', min_quantity: 1, max_quantity: 10000 }] };
   if (sql.includes('SELECT m.user_provider_account_id')) return { rows: [{ user_provider_account_id: account, provider_service_id: '1', rate: 1, min_quantity: 1, max_quantity: 100, user_service_id: account }] };
   if (sql.includes('INSERT INTO lovable_legacy.engagement_orders')) return { rows: [{ id: account, order_number: 439 }] };
   if (sql.includes('INSERT INTO lovable_legacy.engagement_order_items')) return { rows: [{ id: account }] };
@@ -54,4 +55,19 @@ test('Delete cancels only unsent runs and marks the owned order deleted', async 
   await call('/functions/engagement-order-action', { order_ids: [account], action: 'delete' });
   assert.ok(dbQueries.some(q => q.sql.includes('run.provider_order_id IS NULL')));
   assert.ok(dbQueries.some(q => q.sql.includes("SET status='deleted'")));
+});
+test('placed orders start small and avoid the previous Reel starting views', async () => {
+  globalThis.__recentStarts = [{ engagement_type: 'views', quantity_to_send: 90 }];
+  const at = (m) => new Date(Date.now() + m * 60_000).toISOString();
+  const runs = (qs) => qs.map((q, i) => ({ scheduled_at: at(i * 20), quantity_to_send: q }));
+  const mapping = [{ user_provider_account_id: account, provider_service_id: '1' }];
+  const result = await call('/functions/process-engagement-order', { user_bundle_id: account, link: 'https://instagram.com/reel/x/', base_quantity: 240,
+    engagements: [{ type: 'views', quantity: 240, provider_mappings: mapping, scheduled_runs: runs([90, 80, 70]) },
+      { type: 'likes', quantity: 62, provider_mappings: mapping, scheduled_runs: runs([24, 16, 22]) }] });
+  assert.equal(result.statusCode, 201);
+  const inserted = dbQueries.filter(q => q.sql.includes('INSERT INTO lovable_legacy.organic_run_schedule'));
+  const firstOf = (n) => inserted.slice(n === 'views' ? 0 : 3).find(q => q.params[2] === 1).params[4];
+  assert.notEqual(firstOf('views'), 90);
+  assert.ok(firstOf('likes') < 24);
+  globalThis.__recentStarts = [];
 });

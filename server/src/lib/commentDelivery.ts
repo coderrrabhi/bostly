@@ -41,3 +41,29 @@ export function runCommentText(run: {
 export function commentRetryMinutes(retryCount: number): number {
   return Math.min(60, 2 * 2 ** Math.min(5, Math.max(0, retryCount)));
 }
+export const MAX_COMMENT_RECREATES = 20;
+
+/**
+ * Providers sometimes accept a comment order and later cancel/refund it with
+ * nothing delivered. Such a run is safe to recreate with the same text and
+ * quantity: the earlier provider order is closed and was not charged.
+ */
+export function shouldRecreateCancelledComment(run: {
+  engagement_type?: unknown; status: string; quantity_to_send: number;
+  remains?: unknown; charge?: unknown; retry_count?: unknown;
+}): boolean {
+  if (!isCommentEngagement(run.engagement_type)) return false;
+  const s = String(run.status ?? "").toLowerCase();
+  if (!(s.startsWith("cancel") || s === "refunded")) return false;
+  if (Number(run.retry_count ?? 0) >= MAX_COMMENT_RECREATES) return false;
+  // Recreate only when the provider's counters prove nothing was delivered.
+  // A finite remains below the quantity means partial delivery — recreating
+  // would post the same comments twice. A zero charge only counts when the
+  // panel did not report remains at all.
+  const hasRemains = run.remains !== null && run.remains !== undefined && run.remains !== ""
+    && Number.isFinite(Number(run.remains));
+  if (hasRemains) return Number(run.remains) >= Number(run.quantity_to_send);
+  const hasCharge = run.charge !== null && run.charge !== undefined && run.charge !== ""
+    && Number.isFinite(Number(run.charge));
+  return hasCharge && Number(run.charge) === 0;
+}

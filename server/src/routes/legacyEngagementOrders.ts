@@ -6,6 +6,18 @@ import { resolveLegacyId } from "../lib/identity";
 import { kickRotationExecutor } from "../workers/multiProviderRotationWorker";
 import { validateCommentOrder } from "../lib/commentDelivery";
 import { paceRunsToViews } from "../lib/ratioPacing";
+import { runMaximum, runMinimum, shapeEngagementRuns } from "../lib/runShaping";
+
+export function normalizeReelLink(raw: string): string {
+  try {
+    const url = new URL(raw);
+    if (!/(^|\.)instagram\.com$/i.test(url.hostname)) return raw;
+    const path = url.pathname.replace(/\/+$/, "");
+    return `https://www.instagram.com${path}/`;
+  } catch {
+    return raw;
+  }
+}
 
 const router: IRouter = Router();
 router.use(requireAuth);
@@ -117,7 +129,9 @@ const orderSchema = z.object({
   order_name: z.string().trim().max(120).optional(),
   curve_name: z.string().trim().max(160).optional(),
   user_bundle_id: z.string().uuid(),
-  link: z.string().trim().url().max(2048),
+  // Strip share/tracking query text (e.g. ?psln=, ?igsh=) so providers get the
+  // canonical Reel URL; some providers fail to resolve links with extra params.
+  link: z.string().trim().url().max(2048).transform(normalizeReelLink),
   base_quantity: z.coerce.number().int().positive(),
   // Minutes to wait before the FIRST run goes to the provider (0 = instant).
   start_delay_minutes: z.coerce.number().int().min(0).max(1440).optional(),
@@ -161,10 +175,30 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
     }> = [];
     let totalPrice = 0;
 
+    // Starting quantities used on this customer's recent Reels, per engagement,
+    // so every new Reel starts with a different first-run quantity. The bundle
+    // row lock above serializes mass orders, so each sees the previous one.
+    const recentStartRows = await client.query(
+      `SELECT i.engagement_type, r.quantity_to_send
+         FROM lovable_legacy.engagement_orders o
+         JOIN lovable_legacy.engagement_order_items i ON i.engagement_order_id=o.id
+         JOIN lovable_legacy.organic_run_schedule r ON r.engagement_order_item_id=i.id AND r.run_number=1
+        WHERE o.user_id=$1::uuid
+        ORDER BY o.order_number DESC
+        LIMIT 600`,
+      [userId],
+    );
+    const recentStarts = new Map<string, number[]>();
+    for (const row of recentStartRows.rows) {
+      const list = recentStarts.get(row.engagement_type) ?? [];
+      if (list.length < 25) list.push(Number(row.quantity_to_send));
+      recentStarts.set(row.engagement_type, list);
+    }
+
     for (const engagement of input.engagements) {
       validateCommentOrder(engagement.type, engagement.custom_comments, engagement.quantity);
       const bundleItem = await client.query(
-        `SELECT id FROM lovable_legacy.user_bundle_items
+        `SELECT id, min_quantity, max_quantity FROM lovable_legacy.user_bundle_items
          WHERE user_bundle_id=$1::uuid AND user_id=$2::uuid
            AND ($3::uuid IS NULL OR id=$3::uuid)
            AND engagement_type=$4
@@ -204,9 +238,11 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
         (best, row) => !best || Number(row.rate || 0) < Number(best.rate || 0) ? row : best,
         null,
       );
-      const providerMin = services.length
+      const serviceMin = services.length
         ? Math.min(...services.map((row) => Number(row.min_quantity) || 1))
         : 1;
+      // My Bundles minimum wins over the provider service minimum.
+      const providerMin = runMinimum(bundleItem.rows[0].min_quantity, serviceMin);
       const providerMax = services.length
         ? Math.max(...services.map((row) => Number(row.max_quantity) || 0))
         : 0;
@@ -239,7 +275,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       const nonZeroRuns = rawRuns.filter((r) => r.quantity_to_send > 0);
       const lostQty = rawRuns.reduce((s, r) => s + r.quantity_to_send, 0)
                     - nonZeroRuns.reduce((s, r) => s + r.quantity_to_send, 0);
-      const runs = nonZeroRuns.length > 0
+      const builtRuns = nonZeroRuns.length > 0
         ? nonZeroRuns.map((r, i) =>
             i === nonZeroRuns.length - 1 && lostQty > 0
               ? { ...r, quantity_to_send: r.quantity_to_send + lostQty }
@@ -252,6 +288,15 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
             variance_applied: 0,
             peak_multiplier: 1,
           }];
+      // Small start + mixed run sizes (non-view engagements) and a starting
+      // quantity different from recent Reels (all engagements).
+      const runs = shapeEngagementRuns({
+        type: engagement.type,
+        runs: builtRuns,
+        min: providerMin,
+        max: runMaximum(bundleItem.rows[0].max_quantity, providerMax),
+        recentStarts: recentStarts.get(engagement.type) ?? [],
+      });
       const scheduledTotal = runs.reduce((sum, run) => sum + run.quantity_to_send, 0);
       if (scheduledTotal !== engagement.quantity) {
         throw new Error(`${engagement.type} schedule quantity does not match its order quantity.`);
@@ -305,7 +350,11 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       quantity: item.engagement.quantity,
       runs: item.engagement.scheduled_runs ?? [],
     })));
-    prepared.forEach((item, i) => { item.engagement.scheduled_runs = paced[i]; });
+    prepared.forEach((item, i) => {
+      item.engagement.scheduled_runs = [...paced[i]].sort(
+        (a, b) => Date.parse(a.scheduled_at) - Date.parse(b.scheduled_at),
+      );
+    });
 
     totalPrice = Math.round(totalPrice * 10_000) / 10_000;
     const orderResult = await client.query(

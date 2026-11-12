@@ -11,7 +11,7 @@ await build({ stdin: { contents: worker + '\nexport { processNextRun };', loader
   bundle: true, platform: 'node', format: 'esm', plugins: [{ name: 'isolated-worker-dependencies', setup(b) {
     b.onResolve({ filter: /^\.\.\/(db|lib\/providerCredentials|lib\/logger)$/ }, args => ({ path: args.path, namespace: 'mock' }));
     b.onLoad({ filter: /.*/, namespace: 'mock' }, args => ({ contents:
-      args.path === '../db' ? 'export const workerPool={query:(...a)=>globalThis.__query(...a)};' :
+      args.path === '../db' ? 'export const workerPool={query:(...a)=>globalThis.__query(...a),connect:async()=>({query:(...a)=>globalThis.__query(...a),release(){}})};' :
       args.path.includes('providerCredentials') ? 'export const decryptProviderCredential=()=>"mock-key";' :
       'export const logger={info(){},warn(){},error(){}};' }));
   } }] });
@@ -69,4 +69,27 @@ test('unreadable provider confirmation is held without automatic failover', asyn
   await processNextRun();
   assert.equal(requests.length, 1);
   assert.ok(queries.some(q => q.sql.includes("status='dispatch_uncertain'")));
+});
+test('likes run below every provider minimum merges into the next run instead of failing', async () => {
+  setup(() => new Response(JSON.stringify({ error: 'Quantity less than minimal 10' })),
+    { engagement_type: 'likes', quantity_to_send: 3, custom_comments: null, item_comments: null, comments_text: null });
+  const baseQuery = globalThis.__query;
+  globalThis.__query = async (sql, params) => {
+    if (sql.includes('SELECT id, quantity_to_send')) return { rows: [{ id: 'next-run', quantity_to_send: 5 }] };
+    if (sql.includes('BEGIN') || sql.includes('COMMIT') || sql.includes('ROLLBACK')) return { rows: [] };
+    return baseQuery(sql, params);
+  };
+  await processNextRun();
+  assert.equal(requests.length, 2);
+  assert.ok(queries.some(q => q.sql.includes('SET quantity_to_send=$1') && q.params[0] === 8 && q.params[1] === 'next-run'));
+  assert.ok(queries.some(q => q.sql.includes("SET status='merged'")));
+  assert.equal(queries.some(q => q.sql.includes("SET status='failed'")), false);
+});
+test('other provider rejections still fail non-comment runs without merging', async () => {
+  setup(() => new Response(JSON.stringify({ error: 'Incorrect service' })),
+    { engagement_type: 'likes', quantity_to_send: 3, custom_comments: null, item_comments: null, comments_text: null });
+  await processNextRun();
+  assert.equal(requests.length, 2);
+  assert.ok(queries.some(q => q.sql.includes("SET status='failed'")));
+  assert.equal(queries.some(q => q.sql.includes("SET status='merged'")), false);
 });
