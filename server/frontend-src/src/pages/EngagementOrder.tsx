@@ -1,3 +1,4 @@
+import { curvePlan, runsForWindow } from '@/lib/curve-plan';
 import { DeliveryStartTime } from "@/components/engagement/DeliveryStartTime";
 import { loadDeliverySettings, deliveryPayload, type DeliverySettings } from "@/lib/order-delivery-settings";
 import { useState, useMemo, useEffect, useCallback, useRef, memo } from "react";
@@ -280,32 +281,23 @@ export default function EngagementOrder() {
   const [showExtendedCurves, setShowExtendedCurves] = useState(false);
   const [extendedSeed, setExtendedSeed] = useState<number>(101);
 
-  // Auto timeframe calculator based on views quantity & curve pattern
-  const autoCalculatedHours = useMemo(() => {
-    let base = 4;
-    if (baseQuantity <= 500) base = 2;
-    else if (baseQuantity <= 1500) base = 3;
-    else if (baseQuantity <= 5000) base = 6;
-    else if (baseQuantity <= 10000) base = 10;
-    else if (baseQuantity <= 25000) base = 16;
-    else if (baseQuantity <= 50000) base = 24;
-    else if (baseQuantity <= 100000) base = 36;
-    else base = 48;
-
+  // Runs and timeframe planned from the views quantity and the selected curve,
+  // so the curve is drawn smoothly and every run finishes inside the window.
+  const selectedCurvePlan = useMemo(() => {
     const preset = CURVE_PRESETS.find(p => p.id === selectedCurveId);
-    const factor = preset?.timeFactor ?? 1.0;
-    return Math.max(1, Math.round(base * factor));
+    return curvePlan(baseQuantity, preset?.timeFactor ?? 1.0);
   }, [baseQuantity, selectedCurveId]);
+  const autoCalculatedHours = selectedCurvePlan.autoHours;
 
   const activeTimeframeHours = timeframeMode === 'auto' ? autoCalculatedHours : (customTimeHours || 4);
 
-  // Auto-calculated number of runs based on timeframe and quantity
-  const autoCalculatedRuns = useMemo(() => {
-    const targetIntervalMinutes = 20; // ~1 run every 20 minutes
-    const theoreticalRuns = Math.round((activeTimeframeHours * 60) / targetIntervalMinutes);
-    const maxRunsByQty = Math.max(3, Math.floor(baseQuantity / 10));
-    return Math.max(4, Math.min(theoreticalRuns, maxRunsByQty, 65));
-  }, [activeTimeframeHours, baseQuantity]);
+  const autoCalculatedRuns = useMemo(
+    // Same views minimum as the schedule preview, so both show the same count.
+    () => (baseQuantity > 0 ? runsForWindow('views', baseQuantity, activeTimeframeHours, Math.max(1, engagements.views?.minQuantity || 100)) : 0),
+    [activeTimeframeHours, baseQuantity, engagements.views?.minQuantity],
+  );
+  const customOutOfRange = timeframeMode === 'custom' && baseQuantity > 0 &&
+    (activeTimeframeHours < selectedCurvePlan.minHours || activeTimeframeHours > selectedCurvePlan.maxHours);
 
   const applyPresetCurve = useCallback((presetId: string) => {
     setSelectedCurveId(presetId);
@@ -1157,16 +1149,40 @@ export default function EngagementOrder() {
               </div>
             )}
 
+            {baseQuantity > 0 && (
+              <div className={cn(
+                "rounded-xl border p-3 text-xs space-y-1",
+                customOutOfRange ? "border-destructive/40 bg-destructive/5" : "border-border bg-secondary/40"
+              )}>
+                <p className="font-semibold text-foreground">
+                  For a perfect {CURVE_PRESETS.find(p => p.id === selectedCurveId)?.name ?? 'curve'} with {baseQuantity.toLocaleString()} views:
+                </p>
+                <p className="text-muted-foreground">
+                  {selectedCurvePlan.runs} views runs · Timeframe {selectedCurvePlan.minHours}h (min) to {selectedCurvePlan.maxHours}h (max) · Best {selectedCurvePlan.autoHours}h
+                </p>
+                {customOutOfRange && (
+                  <p className="text-destructive font-medium">
+                    {activeTimeframeHours}h is outside this range, so runs will be {activeTimeframeHours < selectedCurvePlan.minHours ? 'very close together' : 'far apart'}. Choose {selectedCurvePlan.minHours}–{selectedCurvePlan.maxHours}h for a smooth curve.
+                  </p>
+                )}
+                {timeframeMode === 'custom' && customOutOfRange && (
+                  <button type="button" onClick={() => setCustomTimeHours(selectedCurvePlan.autoHours)} className="text-primary font-semibold underline">
+                    Use {selectedCurvePlan.autoHours}h
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Auto-calculated Runs Display */}
             <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-primary shrink-0" />
                 <span className="text-xs text-foreground font-medium">
-                  Auto-Calculated Schedule: <b className="text-primary font-bold">{autoCalculatedRuns} Runs</b> across all engagements
+                  Auto-Calculated Schedule: <b className="text-primary font-bold">{autoCalculatedRuns} Views Runs</b>, all engagements finish inside {activeTimeframeHours}h
                 </span>
               </div>
               <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
-                <span>⏱ Pacing: ~1 run every {Math.max(2, Math.round((activeTimeframeHours * 60) / autoCalculatedRuns))} mins</span>
+                <span>⏱ Pacing: ~1 run every {Math.max(2, Math.round((activeTimeframeHours * 60) / Math.max(1, autoCalculatedRuns)))} mins</span>
                 <span>•</span>
                 <span>Total: {activeTimeframeHours}h</span>
               </div>
@@ -1184,7 +1200,7 @@ export default function EngagementOrder() {
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <Label className="text-base font-bold text-foreground">Top 10 Delivery Curves (High Approval)</Label>
+                    <Label className="text-base font-bold text-foreground">Top Delivery Curves (High Approval)</Label>
                     <Badge variant="outline" className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20 text-[10px] font-bold">
                       99.4% Algorithm Pass Rate
                     </Badge>

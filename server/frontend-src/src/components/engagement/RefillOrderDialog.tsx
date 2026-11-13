@@ -10,6 +10,8 @@ import { Loader2, RefreshCw, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { CurveSparkline } from '@/components/engagement/CurveSparkline';
 import { scaleRunsToCurve, type PlainRun } from '@/lib/organic-extras';
+import { averageLastCompletedRuns } from '@/lib/refill-plan';
+import { curvePlan } from '@/lib/curve-plan';
 
 interface Props {
   orderId: string | null;
@@ -29,6 +31,9 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
   const [views, setViews] = useState<number>(0);
   const [customCommentsText, setCustomCommentsText] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
+  const [overrides, setOverrides] = useState<Record<string, number>>({});
+  const [timeframeMode, setTimeframeMode] = useState<'auto' | 'custom'>('auto');
+  const [customHours, setCustomHours] = useState<number>(0);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['refill-order-source', orderId],
@@ -38,7 +43,7 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
       if (!orderId) throw new Error('Select an order.');
       const { data: order, error: orderError } = await supabase
         .from('engagement_orders')
-        .select('id, order_number, order_name, curve_name, link, base_quantity, user_bundle_id, items:engagement_order_items(id, engagement_type, quantity, user_service_id, user_bundle_item_id, provider_mappings, custom_comments, runs:organic_run_schedule(scheduled_at, quantity_to_send, run_number))')
+        .select('id, order_number, order_name, curve_name, link, base_quantity, user_bundle_id, items:engagement_order_items(id, engagement_type, quantity, user_service_id, user_bundle_item_id, provider_mappings, custom_comments, runs:organic_run_schedule(scheduled_at, quantity_to_send, run_number, status))')
         .eq('id', orderId)
         .single();
       if (orderError) throw orderError;
@@ -65,6 +70,10 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
     const v = items.find((i) => i.engagement_type === 'views');
     return Number(v?.quantity) || Number(data?.order?.base_quantity) || 0;
   }, [items, data]);
+
+  // A new views quantity re-fills every engagement from the bundle ratio.
+  useEffect(() => { setOverrides({}); }, [views, parsedCommentsKey(customCommentsText)]);
+  useEffect(() => { if (!open) { setOverrides({}); setTimeframeMode('auto'); } }, [open]);
 
   useEffect(() => {
     if (open && originalViews) {
@@ -96,6 +105,12 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
       (data?.bundle?.user_bundle_items ?? []).some((b: any) => b.engagement_type === 'comments');
   }, [items, data]);
 
+  // Refill starts from the average of this Reel's last 20 completed views runs.
+  const avgLast20Views = useMemo(() => {
+    const v = items.find((i) => i.engagement_type === 'views');
+    return averageLastCompletedRuns(v?.runs ?? [], 20);
+  }, [items]);
+
   const limitsFor = (mappings: any[]) => {
     const matched = (data?.services ?? []).filter((s: any) =>
       mappings.some((m: any) => m.user_provider_account_id === s.user_provider_account_id && String(m.provider_service_id) === String(s.provider_service_id)),
@@ -116,14 +131,18 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
         .sort((a: any, b: any) => (a.priority ?? 999) - (b.priority ?? 999));
       const stored = Array.isArray(item.provider_mappings) ? item.provider_mappings : [];
       const mappings = current.length ? current : stored;
-      const { min, max } = limitsFor(mappings);
+      const limits = limitsFor(mappings);
+      const max = limits.max;
+      const min = item.engagement_type === 'views' && avgLast20Views > 0
+        ? Math.max(limits.min, max > 0 ? Math.min(avgLast20Views, max) : avgLast20Views)
+        : limits.min;
 
       let quantity = 0;
       let ratioLabel = '';
       let customCommentsToUse: string[] | undefined = undefined;
 
       if (item.engagement_type === 'views') {
-        quantity = Math.max(min, views);
+        quantity = Math.max(min, views, avgLast20Views);
       } else if (item.engagement_type === 'comments') {
         if (parsedComments.length > 0) {
           quantity = Math.max(min, parsedComments.length);
@@ -166,10 +185,16 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
         const raw = pct > 0 ? Math.round(views * (pct / 100)) : Math.round(Number(item.quantity) * factor);
         quantity = Math.max(min, raw);
       }
+      const override = overrides[item.engagement_type];
+      if (item.engagement_type !== 'views' && override !== undefined) quantity = Math.max(0, override);
 
       return { item, bundleItem, mappings, min, max, quantity, ratioLabel, customCommentsToUse };
     });
-  }, [items, views, originalViews, data, parsedComments]);
+  }, [items, views, originalViews, data, parsedComments, avgLast20Views, overrides]);
+
+  const plannedCurve = useMemo(() => curvePlan(views || originalViews, 1), [views, originalViews]);
+  const activeHours = timeframeMode === 'auto' ? plannedCurve.autoHours : (customHours || plannedCurve.autoHours);
+  const customOutOfRange = timeframeMode === 'custom' && (activeHours < plannedCurve.minHours || activeHours > plannedCurve.maxHours);
 
   const viewsRuns: PlainRun[] = useMemo(() => {
     const v = items.find((i) => i.engagement_type === 'views') ?? items[0];
@@ -191,7 +216,8 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
         .filter((p) => p.mappings.length && p.bundleItem && p.quantity > 0)
         .map((p) => {
           const original: PlainRun[] = (p.item.runs ?? []).map((r: any) => ({ scheduled_at: r.scheduled_at, quantity_to_send: Number(r.quantity_to_send) }));
-          const runs = scaleRunsToCurve(original, p.quantity, startAt, p.min, p.max, Number.isFinite(anchor) ? anchor : undefined);
+          const scaled = scaleRunsToCurve(original, p.quantity, startAt, p.min, p.max, Number.isFinite(anchor) ? anchor : undefined);
+          const runs = fitRunsToWindow(scaled, startAt.getTime(), activeHours);
           return {
             type: p.item.engagement_type,
             quantity: p.quantity,
@@ -216,6 +242,7 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
           };
         });
 
+      if (!engagements.length) throw new Error('Nothing to refill.');
       const { data: res, error: invokeError } = await supabase.functions.invoke('process-engagement-order', {
         body: {
           user_bundle_id: data.order.user_bundle_id,
@@ -244,7 +271,7 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-3xl w-[95vw] max-h-[92vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><RefreshCw className="w-4 h-4 text-primary" /> Refill with same curve</DialogTitle>
           <DialogDescription>
@@ -276,6 +303,11 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
               <p className="text-[11px] text-muted-foreground mt-1">
                 Engagement auto-recalculates dynamically based on your bundle's selective % (or original ratio).
               </p>
+              {avgLast20Views > 0 && (
+                <p className="text-[11px] text-primary font-medium mt-1">
+                  Views runs start from {avgLast20Views.toLocaleString()} (average of the last 20 completed views runs on this Reel).
+                </p>
+              )}
             </div>
 
             {hasCommentsType && (
@@ -301,18 +333,60 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-2">
-              {plan.map((p) => (
-                <div key={p.item.id} className="flex items-center justify-between rounded-lg border border-border bg-secondary/30 px-3 py-2 text-xs">
-                  <div className="flex flex-col">
-                    <span className="capitalize text-muted-foreground font-medium">{p.item.engagement_type}</span>
-                    {p.ratioLabel && <span className="text-[10px] text-primary/80 font-mono">{p.ratioLabel}</span>}
-                  </div>
-                  <b className={!p.mappings.length ? 'text-destructive font-mono' : 'font-mono'}>
-                    {p.mappings.length ? p.quantity.toLocaleString() : 'not mapped'}
-                  </b>
+            <div className="rounded-lg border border-border bg-secondary/20 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-xs font-semibold">Delivery Timeframe</Label>
+                <div className="flex rounded-lg bg-secondary p-0.5 text-xs">
+                  {(['auto', 'custom'] as const).map((m) => (
+                    <button key={m} type="button" onClick={() => { setTimeframeMode(m); if (m === 'custom' && !customHours) setCustomHours(plannedCurve.autoHours); }}
+                      className={`px-3 py-1 rounded-md font-semibold ${timeframeMode === m ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>
+                      {m === 'auto' ? 'Auto Time' : 'Custom Time'}
+                    </button>
+                  ))}
                 </div>
-              ))}
+              </div>
+              {timeframeMode === 'custom' && (
+                <div className="flex items-center gap-2">
+                  <Input type="number" min={1} max={720} className="w-28" value={customHours || ''} onChange={(e) => setCustomHours(Math.min(720, Number(e.target.value) || 0))} />
+                  <span className="text-xs text-muted-foreground">hours</span>
+                </div>
+              )}
+              <p className="text-[11px] text-muted-foreground">
+                {plannedCurve.runs} views runs · best {plannedCurve.minHours}h–{plannedCurve.maxHours}h for this curve · all runs finish inside <b className="text-foreground">{activeHours}h</b>
+              </p>
+              {customOutOfRange && (
+                <p className="text-[11px] text-destructive">
+                  {activeHours}h is outside {plannedCurve.minHours}–{plannedCurve.maxHours}h, the curve may not look smooth.{' '}
+                  <button type="button" className="underline font-semibold" onClick={() => setCustomHours(plannedCurve.autoHours)}>Use {plannedCurve.autoHours}h</button>
+                </p>
+              )}
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <Label className="text-xs font-semibold">Engagement quantities (auto from My Bundles %, editable)</Label>
+                {Object.keys(overrides).length > 0 && (
+                  <button type="button" className="text-[11px] text-primary underline" onClick={() => setOverrides({})}>Reset to ratio</button>
+                )}
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {plan.map((p) => (
+                  <div key={p.item.id} className="rounded-lg border border-border bg-secondary/30 px-3 py-2 text-xs space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="capitalize text-muted-foreground font-medium">{p.item.engagement_type}</span>
+                      {p.ratioLabel && <span className="text-[10px] text-primary/80 font-mono">{overrides[p.item.engagement_type] !== undefined ? 'Custom' : p.ratioLabel}</span>}
+                    </div>
+                    {!p.mappings.length ? (
+                      <b className="text-destructive font-mono">not mapped</b>
+                    ) : p.item.engagement_type === 'views' ? (
+                      <b className="font-mono block py-1.5">{p.quantity.toLocaleString()}</b>
+                    ) : (
+                      <Input type="number" min={0} className="h-8 font-mono text-xs" value={p.quantity}
+                        onChange={(e) => setOverrides((o) => ({ ...o, [p.item.engagement_type]: Number(e.target.value) || 0 }))} />
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         )}
@@ -326,4 +400,17 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
       </DialogContent>
     </Dialog>
   );
+}
+
+function parsedCommentsKey(text: string) { return text.trim(); }
+
+/** Stretch or squeeze runs (keeping their relative spacing) so the last run lands inside the chosen window. */
+export function fitRunsToWindow<T extends { scheduled_at: string }>(runs: T[], startMs: number, hours: number): T[] {
+  if (!runs.length || !(hours > 0)) return runs;
+  const offs = runs.map((r) => Math.max(0, Date.parse(r.scheduled_at) - startMs));
+  const span = Math.max(...offs);
+  const target = hours * 3600_000 * 0.95;
+  if (span <= 0) return runs;
+  const k = target / span;
+  return runs.map((r, i) => ({ ...r, scheduled_at: new Date(startMs + Math.round(offs[i] * k)).toISOString() }));
 }

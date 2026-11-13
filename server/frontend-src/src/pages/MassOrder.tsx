@@ -1,3 +1,4 @@
+import { curvePlan } from '@/lib/curve-plan';
 import { DeliveryStartTime } from '@/components/engagement/DeliveryStartTime';
 import { loadDeliverySettings, deliveryPayload, type DeliverySettings } from '@/lib/order-delivery-settings';
 import { useMemo, useState } from 'react';
@@ -575,6 +576,18 @@ export default function MassOrder() {
                   </div>
                 )}
               </div>
+              {isCustom(timeframe) && (() => {
+                const lo = curvePlan(Math.min(baseQty, baseQtyMax || baseQty));
+                const hi = curvePlan(Math.max(baseQty, baseQtyMax || baseQty));
+                const h = parseInt(timeframe.replace(/\D/g, '')) || 1;
+                const bad = h < hi.minHours || h > lo.maxHours;
+                return (
+                  <p className={`text-xs mt-2 ${bad ? 'text-destructive font-medium' : 'text-muted-foreground'}`}>
+                    For a smooth curve with {Math.min(baseQty, baseQtyMax || baseQty).toLocaleString()}–{Math.max(baseQty, baseQtyMax || baseQty).toLocaleString()} views: {lo.runs}–{hi.runs} views runs, timeframe {hi.minHours}h (min) to {lo.maxHours}h (max).
+                    {bad ? ` ${h}h is outside this range.` : ''}
+                  </p>
+                );
+              })()}
             </div>
           </div>
           <div className="grid md:grid-cols-2 gap-4">

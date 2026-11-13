@@ -62,4 +62,7 @@ test('valid runs pass through untouched', () => {
   const input = [run(101), run(250), run(149)];
   const fixed = enforceRunMinimums(input, 101);
   assert.deepEqual(fixed.map((r) => r.quantity_to_send), [101, 250, 149]);
+});test('a partial Reel with unsent runs can be paused; one with nothing left cannot', () => {
+  assert.equal(canPauseOrder('partial', true), true);
+  assert.equal(canPauseOrder('partial', false), false);
 });

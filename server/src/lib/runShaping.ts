@@ -198,10 +198,56 @@ export function mergeBelowMinimum<T extends ShapeRun>(runs: T[], min: number): T
   return big;
 }
 
+
+/**
+ * Make every run quantity different (same total, never below `min`, never
+ * above `max` when set). Run order by size is kept, so small starts stay
+ * small. Returns null when the total cannot hold that many distinct runs.
+ */
+export function distinctQuantities(q: number[], min: number, max = 0): number[] | null {
+  const n = q.length;
+  const total = q.reduce((a, b) => a + b, 0);
+  if (n <= 1) return [...q];
+  if (n * min + (n * (n - 1)) / 2 > total) return null;
+  const order = q.map((v, i) => i).sort((a, b) => q[a] - q[b] || a - b);
+  const v = [...q];
+  let prev = -Infinity;
+  for (const i of order) { v[i] = Math.max(v[i], prev + 1, min); prev = v[i]; }
+  let excess = v.reduce((a, b) => a + b, 0) - total;
+  for (let guard = 0; excess > 0 && guard < 10000; guard += 1) {
+    let moved = 0;
+    for (let k = n - 1; k >= 0 && excess > 0; k -= 1) {
+      const lo = k ? v[order[k - 1]] + 1 : min;
+      const red = Math.min(excess, v[order[k]] - lo);
+      if (red > 0) { v[order[k]] -= red; excess -= red; moved += red; }
+    }
+    if (!moved) break;
+  }
+  if (excess > 0) return null;
+  if (max > 0 && v.some((x) => x > max)) return null;
+  return v;
+}
+
+/** Every run of one engagement gets a different quantity; merges runs when too few units. */
+export function distinctRuns<T extends ShapeRun>(runs: T[], min: number, max: number): T[] {
+  let list = byTime(runs).map((r) => ({ ...r }));
+  for (;;) {
+    const v = distinctQuantities(list.map((r) => r.quantity_to_send), min, max);
+    if (v) return list.map((r, i) => withQty(r, v[i]));
+    if (list.length <= 1) return list;
+    let si = 0;
+    list.forEach((r, i) => { if (r.quantity_to_send < list[si].quantity_to_send) si = i; });
+    const into = si === list.length - 1 ? si - 1 : si + 1;
+    list[into] = withQty(list[into], list[into].quantity_to_send + list[si].quantity_to_send);
+    list.splice(si, 1);
+  }
+}
+
 /**
  * Final per-engagement run shaping used by single, mass and refill orders:
  * non-view engagements start small and mix small/large runs; every
- * engagement (views included) starts with a quantity not used on recent Reels.
+ * engagement (views included) starts with a quantity not used on recent Reels,
+ * and no two runs of the same engagement share a quantity.
  */
 export function shapeEngagementRuns<T extends ShapeRun>(opts: {
   type: string; runs: T[]; min: number; max: number; recentStarts?: number[]; rng?: Rng;
@@ -217,5 +263,5 @@ export function shapeEngagementRuns<T extends ShapeRun>(opts: {
     preferredMax = smallStartCap(total, runs.length, min, opts.max);
   }
   runs = differentStart(runs, min, opts.max, opts.recentStarts ?? [], preferredMax, rng);
-  return runs;
+  return distinctRuns(runs, min, opts.max);
 }

@@ -465,18 +465,26 @@ router.post("/functions/engagement-order-action", async (req, res): Promise<void
 
     let updated = 0;
     if (action === "pause") {
+      // Pause exactly the selected Reel(s): any owned order that still has
+      // unsent runs (status may read 'partial' when some runs under-delivered).
       const result = await client.query(
-        `UPDATE lovable_legacy.engagement_orders
+        `UPDATE lovable_legacy.engagement_orders o
             SET status='paused',updated_at=now()
-          WHERE id=ANY($1::uuid[]) AND status IN ('pending','processing')`,
-        [owned.rows.filter((row) => ['pending', 'processing'].includes(row.status)).map((row) => row.id)],
+          WHERE o.id=ANY($1::uuid[]) AND o.status IN ('pending','processing','started','partial')
+            AND EXISTS (SELECT 1 FROM lovable_legacy.engagement_order_items i
+                          JOIN lovable_legacy.organic_run_schedule r ON r.engagement_order_item_id=i.id
+                         WHERE i.engagement_order_id=o.id AND r.status='pending' AND r.provider_order_id IS NULL)
+          RETURNING o.id`,
+        [ownedIds],
       );
+      const pausedIds = result.rows.map((row) => row.id as string);
       await client.query(
-        `UPDATE lovable_legacy.engagement_order_items
+        `UPDATE lovable_legacy.engagement_order_items i
             SET status='paused',updated_at=now()
-          WHERE engagement_order_id=ANY($1::uuid[])
-            AND status NOT IN ('completed','cancelled','failed')`,
-        [owned.rows.filter((row) => ['pending', 'processing'].includes(row.status)).map((row) => row.id)],
+          WHERE i.engagement_order_id=ANY($1::uuid[])
+            AND EXISTS (SELECT 1 FROM lovable_legacy.organic_run_schedule r
+                         WHERE r.engagement_order_item_id=i.id AND r.status='pending' AND r.provider_order_id IS NULL)`,
+        [pausedIds],
       );
       updated = result.rowCount ?? 0;
     } else if (action === "resume") {

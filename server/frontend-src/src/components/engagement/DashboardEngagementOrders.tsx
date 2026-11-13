@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { RefillOrderDialog } from '@/components/engagement/RefillOrderDialog';
-import { loadAllEngagementOrders, canPauseOrder, runOrderAction } from '@/lib/engagement-order-management';
+import { loadAllEngagementOrders, canPauseOrder, hasUnsentRuns, runOrderAction } from '@/lib/engagement-order-management';
 import { toast } from 'sonner';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
@@ -36,7 +36,7 @@ export function DashboardEngagementOrders({ userId }: { userId?: string }) {
   const { data: orders = [], isLoading, error } = useQuery({
     queryKey: ['dashboard-engagement-orders', userId], enabled: !!userId,
     queryFn: () => userId ? loadAllEngagementOrders(supabase, userId,
-      'id,order_number,order_name,curve_name,link,status,created_at,items:engagement_order_items(engagement_type,quantity,runs:organic_run_schedule(scheduled_at))') : [],
+      'id,order_number,order_name,curve_name,link,status,created_at,items:engagement_order_items(engagement_type,quantity,runs:organic_run_schedule(scheduled_at,status))') : [],
     refetchInterval: 30000,
   });
   async function refresh() {
@@ -77,7 +77,7 @@ export function DashboardEngagementOrders({ userId }: { userId?: string }) {
             <span>{order.link}</span><ExternalLink className="h-3 w-3 shrink-0 mt-0.5" />
           </a>
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" disabled={busy || !canPauseOrder(order.status)} onClick={() => action(order.id, 'pause')} title={canPauseOrder(order.status) ? 'Pause unsent runs' : 'No active runs to pause'}><Pause className="h-3.5 w-3.5 mr-1" />Pause</Button>
+            <Button size="sm" variant="outline" disabled={busy || !canPauseOrder(order.status, hasUnsentRuns(order))} onClick={() => action(order.id, 'pause')} title={canPauseOrder(order.status, hasUnsentRuns(order)) ? 'Pause unsent runs' : 'No active runs to pause'}><Pause className="h-3.5 w-3.5 mr-1" />Pause</Button>
             {order.status === 'paused' && <Button size="sm" variant="outline" disabled={busy} onClick={() => action(order.id, 'resume')}><Play className="h-3.5 w-3.5 mr-1" />Resume</Button>}
             <Button size="sm" variant="outline" disabled={busy} onClick={() => setDeleteId(order.id)}><Trash2 className="h-3.5 w-3.5 mr-1 text-destructive" />Delete</Button>
             <Button size="sm" variant="outline" disabled={busy} onClick={() => setRefillId(order.id)}><RefreshCw className="h-3.5 w-3.5 mr-1" />Refill</Button>

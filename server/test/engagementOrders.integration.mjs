@@ -9,6 +9,7 @@ const handlers = {};
 globalThis.__dbQuery = async (sql, params) => {
   dbQueries.push({ sql, params });
   if (sql.includes('SELECT id, status')) return { rows: globalThis.__owned };
+  if (sql.includes('RETURNING o.id')) return { rows: [{ id: account }], rowCount: 1 };
   if (sql.includes('SELECT id FROM lovable_legacy.user_bundles')) return { rows: [{ id: 'bundle' }] };
   if (sql.includes('r.run_number=1')) return { rows: globalThis.__recentStarts ?? [] };
   if (sql.includes('FROM lovable_legacy.user_bundle_items')) return { rows: [{ id: 'item', min_quantity: 1, max_quantity: 10000 }] };

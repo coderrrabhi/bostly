@@ -67,3 +67,36 @@ export function shouldRecreateCancelledComment(run: {
     && Number.isFinite(Number(run.charge));
   return hasCharge && Number(run.charge) === 0;
 }
+
+export const MAX_CANCEL_FAILOVERS = 10;
+
+/**
+ * Any engagement (views, likes, saves, shares, reposts, comments) that a
+ * provider cancels/refunds with nothing delivered is re-sent to the next
+ * priority provider. Partial deliveries are never re-sent (no double orders).
+ */
+export function shouldFailoverCancelledRun(run: {
+  engagement_type?: unknown; status: string; quantity_to_send: number;
+  remains?: unknown; charge?: unknown; retry_count?: unknown;
+}): boolean {
+  if (isCommentEngagement(run.engagement_type)) return shouldRecreateCancelledComment(run);
+  if (Number(run.retry_count ?? 0) >= MAX_CANCEL_FAILOVERS) return false;
+  return shouldRecreateCancelledComment({ ...run, engagement_type: "comments", retry_count: 0 });
+}
+
+const SKIP_MARK = /\[skip:([0-9a-f-]{36})\]/i;
+export function cancelledProviderMark(accountId: string | null | undefined): string {
+  return accountId ? ` [skip:${accountId}]` : "";
+}
+/** Put the provider that just cancelled this run last, so the next priority goes first. */
+export function preferOtherProvider<T extends { user_provider_account_id: string }>(
+  ordered: T[], errorMessage: unknown,
+): T[] {
+  const match = SKIP_MARK.exec(String(errorMessage ?? ""));
+  if (!match || ordered.length < 2) return ordered;
+  const skip = match[1].toLowerCase();
+  return [
+    ...ordered.filter((m) => m.user_provider_account_id.toLowerCase() !== skip),
+    ...ordered.filter((m) => m.user_provider_account_id.toLowerCase() === skip),
+  ];
+}

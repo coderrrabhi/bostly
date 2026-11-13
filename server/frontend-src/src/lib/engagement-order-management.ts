@@ -2,8 +2,14 @@ export function isOrderVisible(order: { status?: string }) {
   return order.status !== 'deleted';
 }
 
-export function canPauseOrder(status: string) {
-  return ['pending', 'processing', 'started'].includes(status);
+/** Pause is offered while the Reel still has unsent runs, even if some runs read 'partial'. */
+export function canPauseOrder(status: string, hasUnsentRuns = true) {
+  if (['pending', 'processing', 'started'].includes(status)) return true;
+  return status === 'partial' && hasUnsentRuns;
+}
+
+export function hasUnsentRuns(order: any) {
+  return (order?.items ?? []).some((i: any) => (i.runs ?? []).some((r: any) => r.status === 'pending'));
 }
 
 /**

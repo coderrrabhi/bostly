@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { workerPool as pool } from "../db";
 import { decryptProviderCredential } from "../lib/providerCredentials";
 import { logger } from "../lib/logger";
-import { commentRetryMinutes, isCommentEngagement, runCommentText, shouldRecreateCancelledComment } from "../lib/commentDelivery";
+import { cancelledProviderMark, commentRetryMinutes, isCommentEngagement, preferOtherProvider, runCommentText, shouldFailoverCancelledRun } from "../lib/commentDelivery";
 
 type Mapping = {
   user_provider_account_id: string;
@@ -151,7 +151,7 @@ async function claimRun(): Promise<any | null> {
   const claimToken = randomUUID();
   const result = await pool.query(
     `WITH candidate AS (
-       SELECT rs.id
+       SELECT rs.id, rs.error_message AS prev_error
          FROM lovable_legacy.organic_run_schedule rs
          JOIN lovable_legacy.engagement_order_items eoi ON eoi.id=rs.engagement_order_item_id
          JOIN lovable_legacy.engagement_orders eo ON eo.id=eoi.engagement_order_id
@@ -173,9 +173,9 @@ async function claimRun(): Promise<any | null> {
               error_message=NULL,updated_at=now()
          FROM candidate
         WHERE rs.id=candidate.id AND rs.status='pending'
-        RETURNING rs.*
+        RETURNING rs.*, candidate.prev_error
      )
-     SELECT claimed.*,eoi.provider_mappings,eoi.user_provider_account_id,
+     SELECT claimed.*,eoi.provider_mappings,eoi.user_provider_account_id,eoi.user_bundle_item_id,
             eoi.engagement_type,eo.link,eo.id AS engagement_order_id,eo.user_id,
             eoi.custom_comments AS item_comments,
             (SELECT COALESCE(SUM(previous.quantity_to_send),0)
@@ -188,6 +188,33 @@ async function claimRun(): Promise<any | null> {
     [claimToken],
   );
   return result.rows[0] ?? null;
+}
+
+// Provider order comes from the bundle's CURRENT My Bundles settings at the
+// moment each run is sent, so a priority/enable change applies to the very
+// next run of every live order. The order-time snapshot is only a fallback
+// when the bundle service no longer exists.
+export async function currentMappings(run: any): Promise<Mapping[]> {
+  const snapshot = (Array.isArray(run.provider_mappings) ? run.provider_mappings : []) as Mapping[];
+  if (!run.user_bundle_item_id) return snapshot;
+  const item = await pool.query(
+    `SELECT 1 FROM lovable_legacy.user_bundle_items WHERE id=$1::uuid`,
+    [run.user_bundle_item_id],
+  );
+  if (!item.rows[0]) return snapshot;
+  const live = await pool.query(
+    `SELECT user_provider_account_id, provider_service_id::text AS provider_service_id, priority
+       FROM lovable_legacy.user_bundle_item_providers
+      WHERE user_bundle_item_id=$1::uuid AND enabled=true
+        AND COALESCE(provider_service_id::text,'')<>''
+      ORDER BY priority ASC`,
+    [run.user_bundle_item_id],
+  );
+  return live.rows.map((row) => ({
+    user_provider_account_id: row.user_provider_account_id,
+    provider_service_id: String(row.provider_service_id),
+    priority: Number(row.priority) || 999,
+  }));
 }
 
 async function loadAccounts(mappings: Mapping[]): Promise<Map<string, ProviderAccount>> {
@@ -215,16 +242,16 @@ async function releaseAttempt(runId: string): Promise<void> {
 async function dispatch(run: any): Promise<void> {
   // Validate before taking a provider lock or making any paid request.
   const comments = runCommentText(run);
-  const mappings = (Array.isArray(run.provider_mappings) ? run.provider_mappings : []) as Mapping[];
+  const mappings = await currentMappings(run);
   const accounts = await loadAccounts(mappings);
-  const ordered = mappings
+  const ordered = preferOtherProvider(mappings
     .filter((mapping) => mapping.user_provider_account_id && mapping.provider_service_id && accounts.has(mapping.user_provider_account_id))
     .sort((left, right) => {
       const mappingPriority = Number(left.priority ?? 999) - Number(right.priority ?? 999);
       if (mappingPriority !== 0) return mappingPriority;
       return Number(accounts.get(left.user_provider_account_id)?.priority ?? 999) -
         Number(accounts.get(right.user_provider_account_id)?.priority ?? 999);
-    });
+    }), run.prev_error);
 
   if (!ordered.length) {
     const message = "No active provider account is currently mapped to this service.";
@@ -602,7 +629,7 @@ async function checkRunStatus(run: any): Promise<boolean> {
         String(run.provider_order_id),
       ],
     );
-    if (terminal && shouldRecreateCancelledComment({ engagement_type: run.engagement_type, status,
+    if (terminal && shouldFailoverCancelledRun({ engagement_type: run.engagement_type, status,
       quantity_to_send: Number(run.quantity_to_send), remains: body?.remains, charge: body?.charge,
       retry_count: run.retry_count })) {
       // Provider closed the order unpaid with nothing delivered: queue the same
@@ -615,11 +642,11 @@ async function checkRunStatus(run: any): Promise<boolean> {
                 retry_count=retry_count+1,scheduled_at=now()+($1 * interval '1 minute'),
                 error_message=$2,updated_at=now()
           WHERE id=$3::uuid AND provider_order_id=$4`,
-        [Math.min(10, commentRetryMinutes(Number(run.retry_count ?? 0))),
-          `Provider cancelled order ${run.provider_order_id} with nothing delivered; recreating.`,
+        [Number(run.retry_count ?? 0) === 0 ? 0 : Math.min(10, commentRetryMinutes(Number(run.retry_count ?? 0))),
+          `Provider cancelled order ${run.provider_order_id} with nothing delivered; sending to next priority provider.${cancelledProviderMark(account?.id ?? run.user_provider_account_id)}`,
           run.id, String(run.provider_order_id)],
       );
-      await audit(run, "comment_recreated", account, { providerOrderId: String(run.provider_order_id), response: body });
+      await audit(run, "cancelled_failover", account, { providerOrderId: String(run.provider_order_id), response: body });
       return true;
     }
     if (terminal) {

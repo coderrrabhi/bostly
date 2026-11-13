@@ -198,7 +198,7 @@ router.post("/legacy/query", async (req, res): Promise<void> => {
     // Restored pages still compare user_id with the active auth user ID.
     // Translate Clerk IDs to the linked UUID used by the imported database.
     query.filters = query.filters.map((filter) =>
-      filter.column === "user_id" && typeof filter.value === "string" && (filter.value.startsWith("user_") || filter.value === String((req as AuthenticatedRequest).userId))
+      filter.column === "user_id" && typeof filter.value === "string" && filter.value.startsWith("user_")
         ? { ...filter, value: user.legacyId }
         : filter,
     );

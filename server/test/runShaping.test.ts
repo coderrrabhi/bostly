@@ -85,3 +85,15 @@ test("a run below the bundle minimum is merged, never sent", () => {
   assert.ok(out.every((r) => r.quantity_to_send >= 10));
   assert.equal(sum(out), 55);
 });
+
+test("no two runs of one engagement on a Reel share a quantity", () => {
+  for (const [type, qs, min] of [["saves", Array.from({ length: 25 }, () => 2), 1], ["likes", [24, 16, 22, 27, 20, 32, 27, 17, 14, 13], 1], ["shares", [13, 12, 13, 21, 13, 18, 16, 12], 10], ["views", [300, 300, 300, 300], 101]] as const) {
+    for (let s = 1; s <= 15; s++) {
+      const runs = runsOf([...qs]);
+      const out = shapeEngagementRuns({ type, runs, min, max: 10000, rng: seeded(s) });
+      assert.equal(new Set(out.map((r) => r.quantity_to_send)).size, out.length);
+      assert.equal(sum(out), sum(runs));
+      assert.ok(out.every((r) => r.quantity_to_send >= min));
+    }
+  }
+});
