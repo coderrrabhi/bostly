@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { workerPool as pool } from "../db";
 import { decryptProviderCredential } from "../lib/providerCredentials";
 import { logger } from "../lib/logger";
+import { driftAdjustment, nearestUnused } from "../lib/viewsDrift";
 import { cancelledProviderMark, commentRetryMinutes, isCommentEngagement, preferOtherProvider, runCommentText, shouldFailoverCancelledRun } from "../lib/commentDelivery";
 
 type Mapping = {
@@ -239,7 +240,71 @@ async function releaseAttempt(runId: string): Promise<void> {
   );
 }
 
+// Like/save/share/repost runs follow the Reel's REAL views: when providers
+// delivered extra (or fewer) views, this run carries its % of views share of
+// that difference, limited per run so the selected curve stays smooth.
+// Comments and views runs are never changed. Re-dispatch is idempotent.
+async function applyViewsDrift(run: any): Promise<void> {
+  const type = String(run.engagement_type ?? "");
+  if (/views?$/i.test(type) || isCommentEngagement(type)) return;
+  try {
+    const own = Number(run.drift_adjustment ?? 0);
+    const planned = Number(run.quantity_to_send) - own;
+    const info = await pool.query(
+      `SELECT vi.quantity AS views_total, me.quantity AS item_quantity,
+              COALESCE(ubi.min_quantity,0) AS min_q, COALESCE(ubi.max_quantity,0) AS max_q,
+              (SELECT COALESCE(SUM(o.drift_adjustment),0) FROM lovable_legacy.organic_run_schedule o
+                WHERE o.engagement_order_item_id=me.id AND o.id<>$1::uuid
+                  AND (o.provider_order_id IS NOT NULL OR o.status IN ('completed','partial','started','processing'))) AS applied,
+              NOT EXISTS (SELECT 1 FROM lovable_legacy.organic_run_schedule o
+                WHERE o.engagement_order_item_id=me.id AND o.id<>$1::uuid AND o.status='pending') AS last_run,
+              vi.id AS views_item
+         FROM lovable_legacy.engagement_order_items me
+         JOIN lovable_legacy.engagement_order_items vi
+           ON vi.engagement_order_id=me.engagement_order_id AND vi.engagement_type ~* 'views?$'
+         LEFT JOIN lovable_legacy.user_bundle_items ubi ON ubi.id=me.user_bundle_item_id
+        WHERE me.id=$2::uuid LIMIT 1`,
+      [run.id, run.engagement_order_item_id],
+    );
+    const row = info.rows[0];
+    if (!row) return;
+    const views = await pool.query(
+      `SELECT run_number, quantity_to_send, provider_start_count, status FROM lovable_legacy.organic_run_schedule
+        WHERE engagement_order_item_id=$1::uuid AND status IN ('completed','partial') ORDER BY run_number`,
+      [row.views_item],
+    );
+    const adj = driftAdjustment({
+      views: views.rows.map((v) => ({ runNumber: Number(v.run_number), quantity: Number(v.quantity_to_send),
+        startCount: v.provider_start_count === null ? null : Number(v.provider_start_count), completed: true })),
+      viewsTotal: Number(row.views_total), itemQuantity: Number(row.item_quantity), appliedSoFar: Number(row.applied),
+      runQuantity: planned, min: Number(row.min_q) || 1, max: Number(row.max_q) || 0, lastRun: Boolean(row.last_run),
+    });
+    const siblings = await pool.query(
+      `SELECT quantity_to_send FROM lovable_legacy.organic_run_schedule
+        WHERE engagement_order_item_id=$1::uuid AND id<>$2::uuid AND quantity_to_send>0
+          AND status NOT IN ('cancelled','failed','merged')`,
+      [run.engagement_order_item_id, run.id],
+    );
+    // Never send the same quantity as another run of this engagement.
+    const quantity = nearestUnused(planned + adj, siblings.rows.map((r) => Number(r.quantity_to_send)),
+      Number(row.min_q) || 1, Number(row.max_q) || 0);
+    const finalAdj = quantity - planned;
+    if (finalAdj === own) return;
+    await pool.query(
+      `UPDATE lovable_legacy.organic_run_schedule SET quantity_to_send=$1, drift_adjustment=$2, updated_at=now()
+        WHERE id=$3::uuid AND status='dispatching' AND provider_order_id IS NULL`,
+      [quantity, finalAdj, run.id],
+    );
+    run.quantity_to_send = quantity;
+    run.drift_adjustment = finalAdj;
+    await audit(run, "views_drift_adjusted", undefined, { request: { planned, adjustment: finalAdj, quantity } });
+  } catch (error) {
+    logger.warn({ error, runId: run.id }, "views drift adjustment skipped");
+  }
+}
+
 async function dispatch(run: any): Promise<void> {
+  await applyViewsDrift(run);
   // Validate before taking a provider lock or making any paid request.
   const comments = runCommentText(run);
   const mappings = await currentMappings(run);

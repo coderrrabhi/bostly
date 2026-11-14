@@ -118,3 +118,23 @@ export function smoothSchedule(
     return { runNumber: i + 1, timePercent: Math.max(0, ((i + jitter) / n) * 100), quantity, cumulativeQuantity: sent };
   });
 }
+
+/**
+ * Same rule the server applies at order placement: every run of one
+ * engagement gets a different quantity (total exact, never below `min`).
+ * When the total is too small for that many distinct runs, the smallest run
+ * is merged into its neighbour until it fits. Runs are renumbered.
+ */
+export function distinctRunList<T extends { quantity: number; runNumber: number }>(runs: T[], min: number, max = 0): T[] {
+  let list = runs.filter((r) => r.quantity > 0).map((r) => ({ ...r }));
+  for (;;) {
+    const v = distinctQuantities(list.map((r) => r.quantity), Math.max(1, min), max);
+    if (v) return list.map((r, i) => ({ ...r, quantity: v[i], runNumber: i + 1 }));
+    if (list.length <= 1) return list.map((r, i) => ({ ...r, runNumber: i + 1 }));
+    let si = 0;
+    list.forEach((r, i) => { if (r.quantity < list[si].quantity) si = i; });
+    const into = si === list.length - 1 ? si - 1 : si + 1;
+    list[into] = { ...list[into], quantity: list[into].quantity + list[si].quantity };
+    list.splice(si, 1);
+  }
+}

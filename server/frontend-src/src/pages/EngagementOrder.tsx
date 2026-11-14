@@ -579,23 +579,25 @@ export default function EngagementOrder() {
   }, []);
 
   // Ref guard: skip setPreviewSchedules when the schedule CONTENT hasn't
-  // changed. Timestamps from new Date() always differ, so we compare only
-  // quantities + structure (runNumber, engagementType) to detect real changes.
-  // Without this guard, every DeliveryPreview render calls onScheduleChange →
-  // setPreviewSchedules → parent re-render → new engagements object →
-  // DeliveryPreview re-render → infinite "Maximum update depth exceeded" loop.
+  // changed. Quantities, structure and run times all matter: the growth chart
+  // must move when the selected curve or timeframe changes. DeliveryPreview
+  // memoizes its schedules, so storing them does not retrigger generation.
   const prevScheduleContentKey = useRef<string>('');
 
   const handleScheduleChange = useCallback((payload: {
     schedules: FullOrganicConfig[];
     customQuantities: Record<string, number>;
   }) => {
-    // Build a content key that excludes timestamps (they change on every render
-    // because schedules are generated relative to `new Date()`).
+    // Compare the complete schedule content. The child memoizes its run dates,
+    // so timestamps change only when the plan is actually regenerated.
     const contentKey = JSON.stringify(
       payload.schedules.map(s => ({
         type: s.engagementType,
-        runs: s.runs.map(r => ({ n: r.runNumber, q: payload.customQuantities[`${s.engagementType}-${r.runNumber}`] ?? r.quantity })),
+        runs: s.runs.map(r => ({
+          n: r.runNumber,
+          q: payload.customQuantities[`${s.engagementType}-${r.runNumber}`] ?? r.quantity,
+          t: r.scheduledAt.toISOString(),
+        })),
       }))
     );
     if (contentKey === prevScheduleContentKey.current) return;
@@ -1521,10 +1523,12 @@ export default function EngagementOrder() {
 
 
 
-        {/* Live Growth Chart - Real-time visualization */}
+        {/* Live Growth Chart - the exact selected-curve schedule and quantities */}
         {activeEngagementTypes.length > 0 && (
           <LiveGrowthChart
             engagements={engagements as Record<EngagementType, EngagementConfig>}
+            previewSchedules={previewSchedules}
+            curveName={customCurve ? 'Custom freehand' : (CURVE_PRESETS.find(p => p.id === selectedCurveId)?.name || 'Selected curve')}
             refreshKey={previewRefreshKey}
             onRefresh={() => setPreviewRefreshKey(k => k + 1)}
             platform={platform as 'instagram' | 'tiktok' | 'youtube' | 'twitter' | 'facebook'}

@@ -25,6 +25,7 @@ import {
   interpolateCurve 
 } from "@/lib/curve-to-schedule";
 import { format } from "date-fns";
+import { distinctRunList } from "@/lib/curve-plan";
 import { Clock, TrendingUp, Zap, Timer, Calendar, Pencil, Check, X, ChevronDown, ChevronUp } from "lucide-react";
 
 type Platform = 'instagram' | 'tiktok' | 'youtube' | 'twitter' | 'facebook';
@@ -242,10 +243,12 @@ export function DeliveryPreview({ engagements, refreshKey = 0, platform = 'insta
       
       return schedule;
     });
-    const schedules = coordinateEngagementSchedules(
-      independentSchedules,
-      Object.fromEntries(enabledTypes.map(({ type, config }) => [type, config.minQuantity && config.minQuantity > 0 ? config.minQuantity : 1])),
-    );
+    const runMins: Record<string, number> = Object.fromEntries(enabledTypes.map(({ type, config }) => [type, config.minQuantity && config.minQuantity > 0 ? config.minQuantity : 1]));
+    // No two runs of one engagement share a quantity (same rule as the server).
+    const schedules = coordinateEngagementSchedules(independentSchedules, runMins).map((s) => {
+      const runs = distinctRunList(s.runs, runMins[s.engagementType] ?? 1);
+      return { ...s, runs, runCount: runs.length };
+    });
 
     // Merge all runs into a single timeline with unique IDs
     const allEvents: TimelineEvent[] = [];
@@ -313,7 +316,11 @@ export function DeliveryPreview({ engagements, refreshKey = 0, platform = 'insta
     // Skip the call when content hasn't changed — calling onScheduleChange
     // triggers setPreviewSchedules in the parent, which re-renders and passes
     // a new engagements reference, which would restart the loop.
-    const key = engagementsKey + '|' + curveKey + '|' + JSON.stringify(customQuantities);
+    const scheduleKey = JSON.stringify(schedules.map((schedule) => ({
+      type: schedule.engagementType,
+      runs: schedule.runs.map((run) => [run.runNumber, run.scheduledAt.toISOString(), run.quantity]),
+    })));
+    const key = engagementsKey + '|' + curveKey + '|' + JSON.stringify(customQuantities) + '|' + scheduleKey;
     if (key === prevOnScheduleKey.current) return;
     prevOnScheduleKey.current = key;
     onScheduleChange({ schedules, customQuantities });

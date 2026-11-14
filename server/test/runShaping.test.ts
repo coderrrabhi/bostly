@@ -97,3 +97,20 @@ test("no two runs of one engagement on a Reel share a quantity", () => {
     }
   }
 });
+
+test("dispatch-time adjustment never repeats another run's quantity", async () => {
+  const { nearestUnused } = await import("../src/lib/viewsDrift.ts");
+  assert.equal(nearestUnused(3, [1, 2, 3, 4], 1, 0), 5);
+  assert.equal(nearestUnused(3, [3, 4], 1, 0), 2);
+  assert.equal(nearestUnused(7, [1, 2], 1, 0), 7);
+  assert.equal(nearestUnused(10, [10, 9], 10, 10), 10);
+});
+
+test("saves/comments/reposts preview runs like 1,2,2,1,1 become all different", async () => {
+  const { distinctRunList } = await import("../frontend-src/src/lib/curve-plan.ts");
+  const runs = [1, 2, 2, 1, 1, 1, 1, 2, 2, 1, 1, 1].map((quantity, i) => ({ quantity, runNumber: i + 1 }));
+  const out = distinctRunList(runs, 1);
+  assert.equal(new Set(out.map((r) => r.quantity)).size, out.length);
+  assert.equal(out.reduce((a, r) => a + r.quantity, 0), 16);
+  assert.ok(out.every((r) => r.quantity >= 1));
+});
