@@ -36,3 +36,22 @@ test("order #531 run 18's odd start count (6607 then 6094) is ignored", () => {
   assert.equal(d.ordered, 723);
   assert.equal(d.extra, 6094 + 226 - 5592 - 723);
 });
+
+test("an in-progress provider reading exposes extra views before the views run completes", () => {
+  const views = [
+    { runNumber: 1, quantity: 113, startCount: 10, completed: true, delivered: 113 },
+    { runNumber: 2, quantity: 131, startCount: 281, completed: false, observed: true, delivered: 131 },
+  ];
+  assert.deepEqual(viewsDrift(views), { ordered: 244, extra: 158 });
+  assert.equal(driftAdjustment({ views, viewsTotal: 1000, itemQuantity: 100, appliedSoFar: 0, runQuantity: 20, min: 1, max: 0, lastRun: false }), 10);
+});
+
+test("zero is a valid first provider reading and does not invent extra views", () => {
+  const views = [{ runNumber: 1, quantity: 200, startCount: 0, completed: false, observed: true, delivered: 40 }];
+  assert.deepEqual(viewsDrift(views), { ordered: 40, extra: 0 });
+});
+
+test("the final run never doubles its curve quantity to clear extra-view debt", () => {
+  const views = v([[200, 100], [200, 10000]]);
+  assert.equal(driftAdjustment({ views, viewsTotal: 400, itemQuantity: 400, appliedSoFar: 0, runQuantity: 20, min: 1, max: 0, lastRun: true }), 10);
+});

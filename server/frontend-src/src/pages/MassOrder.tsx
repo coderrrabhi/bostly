@@ -20,6 +20,8 @@ import { toast } from 'sonner';
 import { NoBundleBanner } from '@/components/NoBundleBanner';
 import { coordinateEngagementSchedules, generateOrganicSchedule, generateRandomVaryingRuns } from '@/lib/organic-algorithm';
 import { resolveEffectiveMin } from '@/lib/engagement-order-management';
+import { distinctRunList } from '@/lib/curve-plan';
+import { applyPeakHours } from '@/lib/peak-hours';
 
 interface Row {
   id: string;
@@ -228,7 +230,7 @@ export default function MassOrder() {
   };
 
   // Build each reel's own delivery curve from its seed (same seed = same curve).
-  function buildRuns(types: Record<string, boolean>, qty: Record<string, number>, tf: string, seed: number): { runs: Record<string, ScheduledRun[]>; builtAt: number } {
+  function buildRuns(types: Record<string, boolean>, qty: Record<string, number>, tf: string, seed: number, peakEnabled = peakUS): { runs: Record<string, ScheduledRun[]>; builtAt: number } {
     const hours = timeframeToHours(tf);
     const builtAt = Date.now();
     const start = new Date(builtAt + 5 * 60_000);
@@ -243,7 +245,7 @@ export default function MassOrder() {
     });
 
     const schedules = withSeed(seed, () => coordinateEngagementSchedules(
-      active.map((t) => generateOrganicSchedule(t, qty[t], variance, peakUS, start, effectiveMins[t], hours)),
+      active.map((t) => generateOrganicSchedule(t, qty[t], variance, false, start, effectiveMins[t], hours)),
       effectiveMins,
     ));
     const runs: Record<string, ScheduledRun[]> = {};
@@ -261,7 +263,18 @@ export default function MassOrder() {
     Object.keys(styled).forEach((t) => { runs[t] = styled[t]; });
     // Clean up: drop zero/negative runs and keep the exact total (respecting provider/custom minimum).
     Object.keys(runs).forEach((t) => {
-      runs[t] = normalizeRunTotals(runs[t], qty[t] ?? 0, effectiveMins[t] ?? 1);
+      const normalized = normalizeRunTotals(runs[t], qty[t] ?? 0, effectiveMins[t] ?? 1);
+      const peakRuns = applyPeakHours(normalized, peakEnabled, effectiveMins[t] ?? 1);
+      runs[t] = distinctRunList(
+        peakRuns.map((run, index) => ({ ...run, quantity: run.quantity_to_send, runNumber: index + 1 })),
+        effectiveMins[t] ?? 1,
+      ).map((run) => ({
+        scheduled_at: run.scheduled_at,
+        quantity_to_send: run.quantity,
+        base_quantity: run.quantity,
+        variance_applied: run.variance_applied,
+        peak_multiplier: run.peak_multiplier ?? 1,
+      }));
     });
     return { runs, builtAt };
   }
@@ -282,9 +295,14 @@ export default function MassOrder() {
     return qty;
   }
 
-  function rebuildRow(r: Row, seed = r.seed): Row {
-    const { runs, builtAt } = buildRuns(r.types, r.qty, r.timeframe, seed);
+  function rebuildRow(r: Row, seed = r.seed, peakEnabled = peakUS): Row {
+    const { runs, builtAt } = buildRuns(r.types, r.qty, r.timeframe, seed, peakEnabled);
     return { ...r, seed, runs, builtAt };
+  }
+
+  function togglePeakHours(enabled: boolean) {
+    setPeakUS(enabled);
+    setRows((current) => current.map((row) => rebuildRow(row, row.seed, enabled)));
   }
 
   function preview() {
@@ -449,6 +467,7 @@ export default function MassOrder() {
             base_quantity: r.base_quantity,
             total_price: perRowCost(r),
             is_organic_mode: true,
+            peak_hours_enabled: peakUS,
             ...deliveryPayload(deliverySettings),
             notes: campaign ? `Mass Order: ${campaign}` : 'Mass Order',
             engagements,
@@ -594,9 +613,9 @@ export default function MassOrder() {
             <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-secondary border border-border">
               <div className="min-w-0">
                 <Label className="flex items-center gap-1.5"><Flame className="w-4 h-4 text-primary" /> Peak Hours (USA Time)</Label>
-                <p className="text-[11px] text-muted-foreground mt-0.5">More delivery during 6–11 PM New York time, slower at US night.</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Off by default. On gently boosts 6–11 PM New York within smooth-curve limits; totals and run times stay unchanged.</p>
               </div>
-              <Switch checked={peakUS} onCheckedChange={setPeakUS} />
+              <Switch checked={peakUS} onCheckedChange={togglePeakHours} aria-label="Enable Peak Hours for mass orders" />
             </div>
             <div className="p-3 rounded-xl bg-secondary border border-border">
               <div className="flex items-center justify-between gap-3">

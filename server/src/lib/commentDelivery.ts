@@ -54,7 +54,7 @@ export function shouldRecreateCancelledComment(run: {
 }): boolean {
   if (!isCommentEngagement(run.engagement_type)) return false;
   const s = String(run.status ?? "").toLowerCase();
-  if (!(s.startsWith("cancel") || s === "refunded")) return false;
+  if (!(s.startsWith("cancel") || s === "refunded" || s === "failed" || s === "failure" || s === "error")) return false;
   if (Number(run.retry_count ?? 0) >= MAX_COMMENT_RECREATES) return false;
   // Recreate only when the provider's counters prove nothing was delivered.
   // A finite remains below the quantity means partial delivery — recreating
@@ -84,19 +84,26 @@ export function shouldFailoverCancelledRun(run: {
   return shouldRecreateCancelledComment({ ...run, engagement_type: "comments", retry_count: 0 });
 }
 
-const SKIP_MARK = /\[skip:([0-9a-f-]{36})\]/i;
+const SKIP_MARK = /\[skip:([0-9a-f-]{36})\]/gi;
 export function cancelledProviderMark(accountId: string | null | undefined): string {
   return accountId ? ` [skip:${accountId}]` : "";
 }
-/** Put the provider that just cancelled this run last, so the next priority goes first. */
+
+/** Preserve every provider already tried on this run, not only the latest one. */
+export function appendCancelledProviderMark(previous: unknown, accountId: string | null | undefined): string {
+  const attempted = [...String(previous ?? "").matchAll(SKIP_MARK)].map((match) => match[1].toLowerCase());
+  if (accountId && !attempted.includes(accountId.toLowerCase())) attempted.push(accountId.toLowerCase());
+  return attempted.map((id) => ` [skip:${id}]`).join("");
+}
+
+/** Untried priority providers go first; previously attempted providers stay last. */
 export function preferOtherProvider<T extends { user_provider_account_id: string }>(
   ordered: T[], errorMessage: unknown,
 ): T[] {
-  const match = SKIP_MARK.exec(String(errorMessage ?? ""));
-  if (!match || ordered.length < 2) return ordered;
-  const skip = match[1].toLowerCase();
+  const skipped = new Set([...String(errorMessage ?? "").matchAll(SKIP_MARK)].map((match) => match[1].toLowerCase()));
+  if (!skipped.size || ordered.length < 2) return ordered;
   return [
-    ...ordered.filter((m) => m.user_provider_account_id.toLowerCase() !== skip),
-    ...ordered.filter((m) => m.user_provider_account_id.toLowerCase() === skip),
+    ...ordered.filter((mapping) => !skipped.has(mapping.user_provider_account_id.toLowerCase())),
+    ...ordered.filter((mapping) => skipped.has(mapping.user_provider_account_id.toLowerCase())),
   ];
 }

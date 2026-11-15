@@ -26,6 +26,7 @@ import {
 } from "@/lib/curve-to-schedule";
 import { format } from "date-fns";
 import { distinctRunList } from "@/lib/curve-plan";
+import { applyPeakHours } from "@/lib/peak-hours";
 import { Clock, TrendingUp, Zap, Timer, Calendar, Pencil, Check, X, ChevronDown, ChevronUp } from "lucide-react";
 
 type Platform = 'instagram' | 'tiktok' | 'youtube' | 'twitter' | 'facebook';
@@ -244,9 +245,27 @@ export function DeliveryPreview({ engagements, refreshKey = 0, platform = 'insta
       return schedule;
     });
     const runMins: Record<string, number> = Object.fromEntries(enabledTypes.map(({ type, config }) => [type, config.minQuantity && config.minQuantity > 0 ? config.minQuantity : 1]));
-    // No two runs of one engagement share a quantity (same rule as the server).
+    // Peak Hours is an explicit opt-in applied to the final selected curve.
+    // OFF leaves quantities untouched; ON keeps total, times and smooth caps.
     const schedules = coordinateEngagementSchedules(independentSchedules, runMins).map((s) => {
-      const runs = distinctRunList(s.runs, runMins[s.engagementType] ?? 1);
+      const min = runMins[s.engagementType] ?? 1;
+      const distinct = distinctRunList(s.runs, min);
+      const config = stableEngagements[s.engagementType as EngagementType];
+      const peaked = applyPeakHours(
+        distinct.map((run) => ({
+          scheduled_at: run.scheduledAt.toISOString(),
+          quantity_to_send: run.quantity,
+          base_quantity: run.baseQuantity,
+        })),
+        config?.peakHoursEnabled ?? false,
+        min,
+      );
+      const runs = distinctRunList(peaked.map((run, index) => ({
+        ...distinct[index],
+        quantity: run.quantity_to_send,
+        baseQuantity: run.quantity_to_send,
+        peakMultiplier: run.peak_multiplier ?? 1,
+      })), min);
       return { ...s, runs, runCount: runs.length };
     });
 

@@ -135,6 +135,8 @@ const orderSchema = z.object({
   base_quantity: z.coerce.number().int().positive(),
   // Minutes to wait before the FIRST run goes to the provider (0 = instant).
   start_delay_minutes: z.coerce.number().int().min(0).max(1440).optional(),
+  // Explicit opt-in only. Older clients and omitted flags always save OFF.
+  peak_hours_enabled: z.boolean().optional().default(false),
   engagements: z.array(engagementSchema).min(1).max(30),
 });
 
@@ -359,11 +361,11 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
     totalPrice = Math.round(totalPrice * 10_000) / 10_000;
     const orderResult = await client.query(
       `INSERT INTO lovable_legacy.engagement_orders
-         (user_id,user_bundle_id,link,base_quantity,total_price,is_organic_mode,status,order_name,curve_name)
-       VALUES ($1::uuid,$2::uuid,$3,$4,$5,true,'processing',$6,$7)
+         (user_id,user_bundle_id,link,base_quantity,total_price,is_organic_mode,status,order_name,curve_name,peak_hours_enabled)
+       VALUES ($1::uuid,$2::uuid,$3,$4,$5,true,'processing',$6,$7,$8)
        RETURNING id,order_number`,
       [userId, input.user_bundle_id, input.link, input.base_quantity, totalPrice,
-        input.order_name || null, input.curve_name || null],
+        input.order_name || null, input.curve_name || null, input.peak_hours_enabled],
     );
     const order = orderResult.rows[0];
 

@@ -43,6 +43,14 @@ test('custom Reel name and curve are stored on order placement', async () => {
   assert.equal(result.statusCode, 201);
   const insert = dbQueries.find(q => q.sql.includes('INSERT INTO lovable_legacy.engagement_orders'));
   assert.equal(insert.params[5], 'My Reel'); assert.equal(insert.params[6], 'Viral Surge');
+  assert.equal(insert.params[7], false, 'omitted Peak Hours must save OFF');
+});
+test('Peak Hours saves ON only when the customer explicitly enables it', async () => {
+  const result = await call('/functions/process-engagement-order', { user_bundle_id: account, link: 'https://instagram.com/reel/peak-opt-in/', base_quantity: 1,
+    peak_hours_enabled: true, engagements: [{ type: 'likes', quantity: 1, provider_mappings: [{ user_provider_account_id: account, provider_service_id: '1' }] }] });
+  assert.equal(result.statusCode, 201);
+  const insert = dbQueries.find(q => q.sql.includes('INSERT INTO lovable_legacy.engagement_orders'));
+  assert.equal(insert.params[7], true);
 });
 test('Pause does not change completed or deleted order items', async () => {
   globalThis.__owned = [{ id: account, status: 'processing' }, { id: 'done', status: 'completed' }, { id: 'deleted', status: 'deleted' }];

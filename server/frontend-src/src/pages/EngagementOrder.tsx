@@ -701,6 +701,7 @@ export default function EngagementOrder() {
           base_quantity: baseQuantity,
           total_price: totalPrice,
           is_organic_mode: isOrganicMode,
+          peak_hours_enabled: peakUS,
           ...deliveryPayload(deliverySettings),
           // Per-type settings will be in each engagement object
           engagements: selectedEngagements
@@ -1367,7 +1368,7 @@ export default function EngagementOrder() {
             <CardContent className="p-3 sm:p-4 flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <Label className="text-sm font-bold flex items-center gap-1.5 text-foreground"><Flame className="h-4 w-4 text-primary" /> Peak Hours (USA Time)</Label>
-                <p className="text-[11px] text-muted-foreground mt-0.5">{US_PEAK_LABEL}. Applies to all engagement types.</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Off by default. On gently boosts 6–11 PM New York within smooth-curve limits; total and run times stay unchanged.</p>
               </div>
               <Switch checked={peakUS} onCheckedChange={togglePeakUS} />
             </CardContent>

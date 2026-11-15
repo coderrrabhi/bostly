@@ -2,6 +2,22 @@ export function isOrderVisible(order: { status?: string }) {
   return order.status !== 'deleted';
 }
 
+export function isRefillOrder(order: { order_name?: string | null }) {
+  return /\brefill\b/i.test(String(order?.order_name ?? ''));
+}
+
+/** Counts come from the same retained, non-deleted Reels shown on the dashboard. */
+export function dashboardOrderCounts(orders: Array<{ status?: string; order_name?: string | null }>) {
+  const visible = orders.filter(isOrderVisible);
+  return {
+    total: visible.length,
+    processing: visible.filter((order) => ['pending', 'processing', 'started', 'partial'].includes(String(order.status))).length,
+    completed: visible.filter((order) => order.status === 'completed').length,
+    paused: visible.filter((order) => order.status === 'paused').length,
+    refill: visible.filter(isRefillOrder).length,
+  };
+}
+
 /** Pause is offered while the Reel still has unsent runs, even if some runs read 'partial'. */
 export function canPauseOrder(status: string, hasUnsentRuns = true) {
   if (['pending', 'processing', 'started'].includes(status)) return true;

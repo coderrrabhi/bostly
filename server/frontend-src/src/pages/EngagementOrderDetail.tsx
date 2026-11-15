@@ -28,7 +28,8 @@ import {
   Ban,
   Pause,
   PlayCircle,
-  Timer
+  Timer,
+  ShieldAlert
 } from "lucide-react";
 import { PageMeta } from "@/components/seo/PageMeta";
 import {
@@ -51,6 +52,8 @@ import { PerTypeBreakdown } from "@/components/engagement/PerTypeBreakdown";
 import { EditRunDialog } from "@/components/engagement/EditRunDialog";
 import { OrderProgressChart } from "@/components/engagement/OrderProgressChart";
 import { RefillOrderDialog } from "@/components/engagement/RefillOrderDialog";
+import { reelRiskScore } from "@/lib/reel-risk-score";
+import { safeManualRetryRuns } from "@/lib/manual-retry";
 
 const ENGAGEMENT_ICONS = {
   views: { icon: Eye, label: "Views" },
@@ -198,47 +201,45 @@ export default function EngagementOrderDetail() {
     };
   }, [order?.id, user, queryClient, orderNumber]);
 
-  // Retry failed runs mutation - resets failed runs back to pending
+  // Manual retry never reopens an accepted, uncertain, partial, late, or post-views order.
   const retryFailedMutation = useMutation({
     mutationFn: async () => {
       if (!order?.items) throw new Error('No order items');
-      
-      // Get all failed run IDs from this order
-      const failedRunIds = order.items.flatMap((item: any) => 
-        (item.runs || [])
-          .filter((run: any) => run.status === 'failed')
-          .map((run: any) => run.id)
-      );
-      
-      if (failedRunIds.length === 0) {
-        throw new Error('No failed runs to retry');
+      const failedRuns = safeManualRetryRuns(order);
+      if (failedRuns.length === 0) {
+        throw new Error('No safe failed runs to retry. Accepted, uncertain, late, or post-views orders are left unchanged.');
       }
-      
-      console.log(`Retrying ${failedRunIds.length} failed runs...`);
-      
-      // Reset all failed runs to pending and clear error messages
-      const { error } = await supabase
-        .from('organic_run_schedule')
-        .update({ 
-          status: 'pending', 
-          error_message: null,
-          provider_order_id: null,
-          provider_response: null,
-          provider_status: null,
-          started_at: null,
-          completed_at: null,
-          retry_count: 0, // Reset retry count
-        })
-        .in('id', failedRunIds);
-      
-      if (error) throw error;
-      
-      return { count: failedRunIds.length };
+
+      const results = await Promise.all(failedRuns.map(async (run: any) => {
+        const { error } = await supabase
+          .from('organic_run_schedule')
+          .update({
+            status: 'pending',
+            error_message: '[failover] Manual retry after explicit provider rejections; no order was accepted.',
+            provider_order_id: null,
+            provider_response: null,
+            provider_status: null,
+            provider_remains: null,
+            provider_start_count: null,
+            provider_charge: null,
+            user_provider_account_id: null,
+            user_provider_account_name: null,
+            rotation_lock_key: null,
+            dispatch_uncertain: false,
+            started_at: null,
+            completed_at: null,
+          })
+          .eq('id', run.id)
+          .eq('status', 'failed')
+          .is('provider_order_id', null);
+        if (error) throw error;
+      }));
+      return { count: results.length };
     },
     onSuccess: async (data) => {
       toast({
-        title: "Retrying Failed Runs",
-        description: `${data.count} runs reset to pending - will execute with new API keys!`,
+        title: "Retrying Safe Failed Runs",
+        description: `${data.count} unaccepted runs queued; duplicate and late orders remain blocked.`,
       });
       
       // Refetch order data
@@ -582,6 +583,7 @@ export default function EngagementOrderDetail() {
     const pendingRuns = allRuns.filter((r: any) => r.status === 'pending');
     const startedRuns = allRuns.filter((r: any) => r.status === 'started');
     const failedRuns = allRuns.filter((r: any) => r.status === 'failed');
+    const retryableFailedRuns = safeManualRetryRuns(order);
     
     // Calculate ACTUAL delivered from provider data (provider_status + remains)
     // IMPORTANT: do NOT trust local `status === 'completed'` when the run was "auto-completed"
@@ -649,6 +651,7 @@ export default function EngagementOrderDetail() {
       pendingRuns,
       startedRuns,
       failedRuns,
+      retryableFailedRuns,
       totalDelivered,
       totalQuantity,
       totalScheduled,
@@ -722,6 +725,7 @@ export default function EngagementOrderDetail() {
   const StatusIcon = STATUS_CONFIG[effectiveStatus as keyof typeof STATUS_CONFIG]?.icon || Clock;
   const statusColor = STATUS_CONFIG[effectiveStatus as keyof typeof STATUS_CONFIG]?.color || "";
   const lastUpdated = new Date(dataUpdatedAt);
+  const risk = reelRiskScore(stats.allRuns, stats.perType);
 
   return (
     <DashboardLayout>
@@ -848,11 +852,42 @@ export default function EngagementOrderDetail() {
           totalDelivered={stats.totalDelivered}
           totalQuantity={stats.totalQuantity}
           nextRun={stats.nextRun}
-          onRetryFailed={() => retryFailedMutation.mutate()}
+          onRetryFailed={stats.retryableFailedRuns.length ? () => retryFailedMutation.mutate() : undefined}
           isRetrying={retryFailedMutation.isPending}
           runLists={{ completed: stats.completedRuns, started: stats.startedRuns, pending: stats.pendingRuns }}
           orderLabel={`Order #${order.order_number}`}
         />
+
+        <Card className="glass-card overflow-hidden">
+          <CardContent className="p-4 sm:p-5">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+              <div className="flex items-center gap-3 sm:min-w-[240px]">
+                <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <ShieldAlert className="h-5 w-5" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-foreground">Reel Botting Risk Score</p>
+                  <p className="text-xs text-muted-foreground">Pattern-based heuristic · 0–100</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className={`text-3xl font-black tabular-nums ${risk.score >= 50 ? 'text-destructive' : 'text-primary'}`}>{risk.score}</span>
+                <Badge variant="outline" className={risk.score >= 50 ? 'text-destructive border-destructive/30' : 'text-primary border-primary/30'}>{risk.level}</Badge>
+              </div>
+              <div className="flex-1">
+                <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+                  <div className={`h-full rounded-full transition-all ${risk.score >= 50 ? 'bg-destructive' : 'bg-primary'}`} style={{ width: `${risk.score}%` }} />
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {risk.factors.length ? risk.factors.map((factor) => `${factor.label} (+${factor.points})`).join(' · ') : 'No elevated pattern in the current schedule and provider readings.'}
+                </p>
+              </div>
+            </div>
+            <p className="mt-3 border-t border-border pt-3 text-[11px] text-muted-foreground">
+              This independent estimate uses views ratios, run spikes, same-minute bursts, repeated quantities and over-delivery. It is not Instagram's or Whop's official detection verdict and is not a safety guarantee.
+            </p>
+          </CardContent>
+        </Card>
 
         {/* Real-Time Progress Chart */}
         <OrderProgressChart runs={stats.allRuns} perType={stats.perType} />
@@ -968,8 +1003,10 @@ export default function EngagementOrderDetail() {
                 <p className="font-medium text-foreground">{format(new Date(order.created_at), 'MMM d, yyyy HH:mm')}</p>
               </div>
               <div>
-                <p className="text-muted-foreground">Total Price</p>
-                <p className="font-medium text-lg text-foreground">{formatPrice(order.total_price || 0)}</p>
+                <p className="text-muted-foreground">Botting Score</p>
+                <p className={`font-medium text-lg ${risk.score >= 50 ? 'text-destructive' : 'text-foreground'}`}>
+                  {risk.score}/100 <span className="text-xs font-normal">· {risk.level}</span>
+                </p>
               </div>
               <div>
                 <p className="text-muted-foreground">Variance</p>
@@ -981,60 +1018,6 @@ export default function EngagementOrderDetail() {
               </div>
             </div>
 
-            {/* Detection Risk Level */}
-            {order.is_organic_mode && order.variance_percent && (
-              <div className="rounded-xl border border-border bg-secondary/50 p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-bold text-foreground">Detection Risk Level</span>
-                  <Badge className={
-                    order.variance_percent <= 15 
-                      ? "bg-red-500/20 text-red-400 border border-red-500/30" 
-                      : order.variance_percent <= 25 
-                        ? "bg-amber-500/20 text-amber-400 border border-amber-500/30" 
-                        : order.variance_percent <= 35
-                          ? "bg-green-500/20 text-green-400 border border-green-500/30"
-                          : "bg-blue-500/20 text-blue-400 border border-blue-500/30"
-                  }>
-                    {order.variance_percent <= 15 
-                      ? "Very High" 
-                      : order.variance_percent <= 25 
-                        ? "Medium" 
-                        : order.variance_percent <= 35
-                          ? "Low"
-                          : "Very Low"}
-                  </Badge>
-                </div>
-                
-                {/* Progress Bar */}
-                <div className="relative h-2 w-full rounded-full bg-muted overflow-hidden">
-                  <div 
-                    className={
-                      order.variance_percent <= 15 
-                        ? "h-full rounded-full transition-all duration-300 bg-red-500" 
-                        : order.variance_percent <= 25 
-                          ? "h-full rounded-full transition-all duration-300 bg-amber-500" 
-                          : order.variance_percent <= 35
-                            ? "h-full rounded-full transition-all duration-300 bg-green-500"
-                            : "h-full rounded-full transition-all duration-300 bg-blue-500"
-                    }
-                    style={{ 
-                      width: `${Math.min(100, ((order.variance_percent - 10) / 40) * 100)}%` 
-                    }}
-                  />
-                </div>
-                
-                {/* Description */}
-                <p className="text-xs text-muted-foreground">
-                  {order.variance_percent <= 15 
-                    ? "High bot detection risk - patterns may be detected" 
-                    : order.variance_percent <= 25 
-                      ? "Moderate detection risk - some patterns visible" 
-                      : order.variance_percent <= 35
-                        ? "Natural looking organic pattern"
-                        : "100% undetectable organic pattern"}
-                </p>
-              </div>
-            )}
           </CardContent>
         </Card>
       </div>

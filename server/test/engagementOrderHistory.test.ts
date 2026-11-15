@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { existsSync } from 'node:fs';
 const deployed = new URL('../frontend-src/src/lib/engagement-order-management.ts', import.meta.url);
 const source = new URL('../../frontend/src/lib/engagement-order-management.ts', import.meta.url);
-const { loadAllEngagementOrders, isOrderVisible, canPauseOrder, enforceRunMinimums, resolveEffectiveMin } = await import(existsSync(deployed) ? deployed.href : source.href);
+const { loadAllEngagementOrders, isOrderVisible, canPauseOrder, enforceRunMinimums, resolveEffectiveMin, dashboardOrderCounts, isRefillOrder } = await import(existsSync(deployed) ? deployed.href : source.href);
 
 test('completed Reel links remain visible after 48 hours and indefinitely', () => {
   assert.equal(isOrderVisible({ status: 'completed', completed_at: '2020-01-01' } as any), true);
@@ -62,7 +62,22 @@ test('valid runs pass through untouched', () => {
   const input = [run(101), run(250), run(149)];
   const fixed = enforceRunMinimums(input, 101);
   assert.deepEqual(fixed.map((r) => r.quantity_to_send), [101, 250, 149]);
-});test('a partial Reel with unsent runs can be paused; one with nothing left cannot', () => {
+});
+
+test('dashboard counts use only retained Reels and identify refill orders from their saved name', () => {
+  const orders = [
+    { status: 'processing', order_name: 'Main Reel' },
+    { status: 'partial', order_name: 'Partial Reel' },
+    { status: 'completed', order_name: 'Finished - Refill' },
+    { status: 'paused', order_name: 'Paused Reel' },
+    { status: 'deleted', order_name: 'Deleted - Refill' },
+  ];
+  assert.deepEqual(dashboardOrderCounts(orders), { total: 4, processing: 2, completed: 1, paused: 1, refill: 1 });
+  assert.equal(isRefillOrder({ order_name: 'My Reel - Refill' }), true);
+  assert.equal(isRefillOrder({ order_name: 'My Reel' }), false);
+});
+
+test('a partial Reel with unsent runs can be paused; one with nothing left cannot', () => {
   assert.equal(canPauseOrder('partial', true), true);
   assert.equal(canPauseOrder('partial', false), false);
 });

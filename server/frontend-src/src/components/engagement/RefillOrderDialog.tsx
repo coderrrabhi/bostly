@@ -6,12 +6,14 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Loader2, RefreshCw, MessageSquare } from 'lucide-react';
+import { Loader2, RefreshCw, MessageSquare, Flame } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
 import { toast } from 'sonner';
 import { CurveSparkline } from '@/components/engagement/CurveSparkline';
 import { scaleRunsToCurve, type PlainRun } from '@/lib/organic-extras';
 import { averageLastCompletedRuns } from '@/lib/refill-plan';
-import { curvePlan } from '@/lib/curve-plan';
+import { curvePlan, distinctRunList } from '@/lib/curve-plan';
+import { applyPeakHours } from '@/lib/peak-hours';
 
 interface Props {
   orderId: string | null;
@@ -34,6 +36,7 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
   const [overrides, setOverrides] = useState<Record<string, number>>({});
   const [timeframeMode, setTimeframeMode] = useState<'auto' | 'custom'>('auto');
   const [customHours, setCustomHours] = useState<number>(0);
+  const [peakHoursEnabled, setPeakHoursEnabled] = useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['refill-order-source', orderId],
@@ -43,7 +46,7 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
       if (!orderId) throw new Error('Select an order.');
       const { data: order, error: orderError } = await supabase
         .from('engagement_orders')
-        .select('id, order_number, order_name, curve_name, link, base_quantity, user_bundle_id, items:engagement_order_items(id, engagement_type, quantity, user_service_id, user_bundle_item_id, provider_mappings, custom_comments, runs:organic_run_schedule(scheduled_at, quantity_to_send, run_number, status))')
+        .select('id, order_number, order_name, curve_name, link, base_quantity, user_bundle_id, peak_hours_enabled, items:engagement_order_items(id, engagement_type, quantity, user_service_id, user_bundle_item_id, provider_mappings, custom_comments, runs:organic_run_schedule(scheduled_at, quantity_to_send, run_number, status))')
         .eq('id', orderId)
         .single();
       if (orderError) throw orderError;
@@ -79,6 +82,7 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
     if (open && originalViews) {
       setViews(originalViews);
     }
+    if (open && data?.order) setPeakHoursEnabled(data.order.peak_hours_enabled === true);
     if (open && data?.order?.items) {
       const cItem = (data.order.items as any[]).find((i) => i.engagement_type === 'comments');
       if (cItem?.custom_comments) {
@@ -218,6 +222,17 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
           const original: PlainRun[] = (p.item.runs ?? []).map((r: any) => ({ scheduled_at: r.scheduled_at, quantity_to_send: Number(r.quantity_to_send) }));
           const scaled = scaleRunsToCurve(original, p.quantity, startAt, p.min, p.max, Number.isFinite(anchor) ? anchor : undefined);
           const runs = fitRunsToWindow(scaled, startAt.getTime(), activeHours);
+          const peakRuns = applyPeakHours(
+            runs.map((run) => ({ ...run, base_quantity: run.quantity_to_send })),
+            peakHoursEnabled,
+            p.min,
+            p.max,
+          );
+          const uniqueRuns = distinctRunList(
+            peakRuns.map((run, index) => ({ ...run, quantity: run.quantity_to_send, runNumber: index + 1 })),
+            p.min,
+            p.max,
+          );
           return {
             type: p.item.engagement_type,
             quantity: p.quantity,
@@ -232,12 +247,12 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
               ? p.customCommentsToUse.join("\n")
               : (typeof p.item.custom_comments === 'string' ? p.item.custom_comments : undefined),
             variance_percent: 50,
-            scheduled_runs: runs.map((r) => ({
+            scheduled_runs: uniqueRuns.map((r) => ({
               scheduled_at: r.scheduled_at,
-              quantity_to_send: r.quantity_to_send,
-              base_quantity: r.quantity_to_send,
+              quantity_to_send: r.quantity,
+              base_quantity: r.quantity,
               variance_applied: 0,
-              peak_multiplier: 1,
+              peak_multiplier: r.peak_multiplier ?? 1,
             })),
           };
         });
@@ -251,6 +266,7 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
           order_name: data.order.order_name ? `${data.order.order_name} - Refill`.slice(0, 120) : '',
           curve_name: data.order.curve_name || undefined,
           start_delay_minutes: 5,
+          peak_hours_enabled: peakHoursEnabled,
           base_quantity: views,
           is_organic_mode: true,
           notes: `Refill of #${data.order.order_number}`,
@@ -332,6 +348,14 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
                 </p>
               </div>
             )}
+
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-secondary/20 p-3">
+              <div>
+                <Label className="text-xs font-semibold flex items-center gap-1.5"><Flame className="w-3.5 h-3.5 text-primary" /> Peak Hours (USA Time)</Label>
+                <p className="text-[10px] text-muted-foreground mt-1">Off keeps the selected curve unchanged. On gently boosts 6–11 PM New York within smooth-curve limits.</p>
+              </div>
+              <Switch checked={peakHoursEnabled} onCheckedChange={setPeakHoursEnabled} aria-label="Enable Peak Hours for refill" />
+            </div>
 
             <div className="rounded-lg border border-border bg-secondary/20 p-3 space-y-2">
               <div className="flex items-center justify-between gap-2">

@@ -5,7 +5,9 @@ import { workerPool as pool } from "../db";
 import { decryptProviderCredential } from "../lib/providerCredentials";
 import { logger } from "../lib/logger";
 import { driftAdjustment, nearestUnused } from "../lib/viewsDrift";
-import { cancelledProviderMark, commentRetryMinutes, isCommentEngagement, preferOtherProvider, runCommentText, shouldFailoverCancelledRun } from "../lib/commentDelivery";
+import { appendCancelledProviderMark, commentRetryMinutes, isCommentEngagement, preferOtherProvider, runCommentText, shouldFailoverCancelledRun } from "../lib/commentDelivery";
+import { failedRunFailoverBlock, failoverWindowBlock } from "../lib/failoverPolicy";
+import { speedupTicketDelayMinutes, speedupTicketEligible, speedupTicketMessage } from "../lib/deliverySpeedup";
 
 type Mapping = {
   user_provider_account_id: string;
@@ -269,13 +271,26 @@ async function applyViewsDrift(run: any): Promise<void> {
     const row = info.rows[0];
     if (!row) return;
     const views = await pool.query(
-      `SELECT run_number, quantity_to_send, provider_start_count, status FROM lovable_legacy.organic_run_schedule
-        WHERE engagement_order_item_id=$1::uuid AND status IN ('completed','partial') ORDER BY run_number`,
+      `SELECT run_number, quantity_to_send, provider_start_count, provider_remains, status
+         FROM lovable_legacy.organic_run_schedule
+        WHERE engagement_order_item_id=$1::uuid AND provider_order_id IS NOT NULL
+          AND status IN ('completed','partial','started','processing','cancelled','canceled')
+        ORDER BY run_number`,
       [row.views_item],
     );
     const adj = driftAdjustment({
-      views: views.rows.map((v) => ({ runNumber: Number(v.run_number), quantity: Number(v.quantity_to_send),
-        startCount: v.provider_start_count === null ? null : Number(v.provider_start_count), completed: true })),
+      views: views.rows.map((v) => {
+        const quantity = Number(v.quantity_to_send);
+        const completed = v.status === "completed" || v.status === "partial";
+        const delivered = v.provider_remains !== null && v.provider_remains !== undefined
+          ? Math.max(0, quantity - Number(v.provider_remains))
+          : completed ? quantity : null;
+        return {
+          runNumber: Number(v.run_number), quantity,
+          startCount: v.provider_start_count === null ? null : Number(v.provider_start_count),
+          completed, observed: delivered !== null, delivered,
+        };
+      }),
       viewsTotal: Number(row.views_total), itemQuantity: Number(row.item_quantity), appliedSoFar: Number(row.applied),
       runQuantity: planned, min: Number(row.min_q) || 1, max: Number(row.max_q) || 0, lastRun: Boolean(row.last_run),
     });
@@ -303,7 +318,60 @@ async function applyViewsDrift(run: any): Promise<void> {
   }
 }
 
+async function failoverTiming(run: any): Promise<{ viewsComplete: boolean; nextRunScheduledAt: string | null }> {
+  const [next, views] = await Promise.all([
+    pool.query(
+      `SELECT scheduled_at FROM lovable_legacy.organic_run_schedule
+        WHERE engagement_order_item_id=$1::uuid AND run_number>$2
+        ORDER BY run_number LIMIT 1`,
+      [run.engagement_order_item_id, run.run_number],
+    ),
+    pool.query(
+      `SELECT vi.quantity,vi.status,
+              NOT EXISTS (SELECT 1 FROM lovable_legacy.organic_run_schedule vr
+                WHERE vr.engagement_order_item_id=vi.id
+                  AND vr.status IN ('pending','dispatching','started','processing','dispatch_uncertain')) AS runs_finished,
+              COALESCE((SELECT SUM(CASE
+                WHEN vr.provider_remains IS NOT NULL THEN GREATEST(0,vr.quantity_to_send-vr.provider_remains)
+                WHEN vr.status IN ('completed','partial') THEN vr.quantity_to_send ELSE 0 END)
+                FROM lovable_legacy.organic_run_schedule vr WHERE vr.engagement_order_item_id=vi.id),0) AS delivered
+         FROM lovable_legacy.engagement_order_items vi
+        WHERE vi.engagement_order_id=$1::uuid AND vi.engagement_type ~* 'views?$' LIMIT 1`,
+      [run.engagement_order_id],
+    ),
+  ]);
+  const view = views.rows[0];
+  return {
+    viewsComplete: Boolean(view?.runs_finished) && (
+      view?.status === "completed" || Number(view?.delivered ?? 0) >= Number(view?.quantity ?? 0)
+    ),
+    nextRunScheduledAt: next.rows[0]?.scheduled_at ?? null,
+  };
+}
+
+/** Revalidate a requeued failover immediately before any paid provider call. */
+async function failoverDispatchAllowed(run: any): Promise<boolean> {
+  if (!String(run.prev_error ?? "").includes("[failover]")) return true;
+  const timing = await failoverTiming(run);
+  const block = failoverWindowBlock({ ...timing, now: new Date() });
+  if (!block) return true;
+  const message = block === "views-complete"
+    ? "Failover skipped: all views runs and the ordered views total are already complete."
+    : "Failover skipped: the following run is already due; the old order was not duplicated.";
+  await pool.query(
+    `UPDATE lovable_legacy.organic_run_schedule
+        SET status='failed',claim_token=NULL,claimed_at=NULL,rotation_lock_key=NULL,
+            user_provider_account_id=NULL,user_provider_account_name=NULL,
+            error_message=$1,completed_at=now(),updated_at=now()
+      WHERE id=$2::uuid AND status='dispatching' AND provider_order_id IS NULL`,
+    [message, run.id],
+  );
+  await audit(run, "failover_skipped", undefined, { error: message });
+  return false;
+}
+
 async function dispatch(run: any): Promise<void> {
+  if (!(await failoverDispatchAllowed(run))) return;
   await applyViewsDrift(run);
   // Validate before taking a provider lock or making any paid request.
   const comments = runCommentText(run);
@@ -399,16 +467,15 @@ async function dispatch(run: any): Promise<void> {
         params.set("comments", comments);
       }
       const apiUrl = safePanelUrl(account.api_url);
-      // A crash after sending an add request must not cause a duplicate paid
-      // comment order when the stale-claim recovery runs after restart.
-      if (comments) {
-        const ready = await pool.query(
-          `UPDATE lovable_legacy.organic_run_schedule SET dispatch_uncertain=true,updated_at=now()
-            WHERE id=$1::uuid AND status='dispatching' AND claim_token=$2::uuid RETURNING id`,
-          [run.id, run.claim_token],
-        );
-        if (!ready.rows[0]) return;
-      }
+      // A crash after sending any paid add request must not cause a duplicate
+      // order when stale-claim recovery runs after restart.
+      const ready = await pool.query(
+        `UPDATE lovable_legacy.organic_run_schedule SET dispatch_uncertain=true,updated_at=now()
+          WHERE id=$1::uuid AND status='dispatching' AND claim_token=$2::uuid RETURNING id`,
+        [run.id, run.claim_token],
+      );
+      if (!ready.rows[0]) return;
+      run.dispatch_uncertain = true;
       response = await fetch(apiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "BoostlyPro/1.0 (+api)" },
@@ -434,21 +501,18 @@ async function dispatch(run: any): Promise<void> {
     try {
       body = JSON.parse(text);
     } catch {
-      if (comments) {
-        await pool.query(
-          `UPDATE lovable_legacy.organic_run_schedule SET status='dispatch_uncertain',
-              dispatch_uncertain=true,error_message=$1,updated_at=now() WHERE id=$2::uuid`,
-          [`Provider returned HTTP ${response.status} without a readable order confirmation; verify before resending.`, run.id],
-        );
-        await audit(run, "dispatch_uncertain", account, { request: requestPayload, error: "Unreadable provider response." });
-        return;
-      }
-      body = { error: `Provider returned HTTP ${response.status} without JSON.` };
+      await pool.query(
+        `UPDATE lovable_legacy.organic_run_schedule SET status='dispatch_uncertain',
+            dispatch_uncertain=true,error_message=$1,updated_at=now() WHERE id=$2::uuid`,
+        [`Provider returned HTTP ${response.status} without a readable order confirmation; verify before resending.`, run.id],
+      );
+      await audit(run, "dispatch_uncertain", account, { request: requestPayload, error: "Unreadable provider response." });
+      return;
     }
     const providerOrderId = body?.order ?? body?.order_id ?? body?.id;
 
     if (!response.ok || body?.error || !providerOrderId) {
-      if (comments && !body?.error) {
+      if (!body?.error) {
         await pool.query(
           `UPDATE lovable_legacy.organic_run_schedule SET status='dispatch_uncertain',
               dispatch_uncertain=true,error_message='Provider confirmation missing; verify before resending.',updated_at=now()
@@ -458,9 +522,10 @@ async function dispatch(run: any): Promise<void> {
         return;
       }
       // An explicit rejection confirms no order was accepted, so failover is safe.
-      if (comments) await pool.query(
+      await pool.query(
         `UPDATE lovable_legacy.organic_run_schedule SET dispatch_uncertain=false WHERE id=$1::uuid`, [run.id],
       );
+      run.dispatch_uncertain = false;
       const message = String(body?.error ?? "Provider did not return an order ID.");
       failures.push(`${account.name}: ${message}`);
       await audit(run, isBusyMessage(message) ? "provider_busy_response" : "provider_rejected", account, {
@@ -473,14 +538,24 @@ async function dispatch(run: any): Promise<void> {
       continue;
     }
 
-    await pool.query(
+    const accepted = await pool.query(
       `UPDATE lovable_legacy.organic_run_schedule
           SET provider_order_id=$1,provider_response=$2::jsonb,provider_status='Pending',
               status='started',started_at=COALESCE(started_at,now()),dispatch_uncertain=false,
               error_message=NULL,updated_at=now()
-        WHERE id=$3::uuid AND status='dispatching' AND claim_token=$4::uuid`,
+        WHERE id=$3::uuid AND status='dispatching' AND claim_token=$4::uuid
+        RETURNING id`,
       [String(providerOrderId), JSON.stringify(body), run.id, run.claim_token],
     );
+    if (!accepted.rows[0]) {
+      await pool.query(
+        `UPDATE lovable_legacy.organic_run_schedule SET status='dispatch_uncertain',dispatch_uncertain=true,
+            error_message='Provider returned an order ID but local confirmation failed; verify before resending.',updated_at=now()
+          WHERE id=$1::uuid AND provider_order_id IS NULL`, [run.id],
+      );
+      await audit(run, "dispatch_uncertain", account, { providerOrderId: String(providerOrderId), request: requestPayload, response: body });
+      return;
+    }
     await audit(run, "dispatch_succeeded", account, {
       providerOrderId: String(providerOrderId),
       request: requestPayload,
@@ -549,7 +624,9 @@ async function processNextRun(): Promise<boolean> {
         `UPDATE lovable_legacy.organic_run_schedule
             SET status=CASE WHEN COALESCE(dispatch_uncertain,false) THEN 'dispatch_uncertain' ELSE 'pending' END,
                 rotation_lock_key=CASE WHEN COALESCE(dispatch_uncertain,false) THEN rotation_lock_key ELSE NULL END,
-                claim_token=NULL,claimed_at=NULL,error_message=$1,retry_count=retry_count+1,
+                claim_token=NULL,claimed_at=NULL,
+                error_message=CASE WHEN COALESCE(dispatch_uncertain,false) THEN $1 ELSE '[failover] '||$1 END,
+                retry_count=retry_count+1,
                 scheduled_at=now()+($3 * interval '1 minute'),completed_at=NULL,updated_at=now()
           WHERE id=$2::uuid AND status='dispatching' AND provider_order_id IS NULL RETURNING status`,
         [message, run.id, commentRetryMinutes(Number(run.retry_count ?? 0))],
@@ -557,6 +634,18 @@ async function processNextRun(): Promise<boolean> {
       if (result.rows[0]) await audit(run, result.rows[0].status === "pending" ? "comment_requeued" : "dispatch_uncertain",
         undefined, { error: message });
       logger.warn({ runId: run.id, err: message }, "Comment run retained for retry or provider confirmation");
+      return true;
+    }
+    if (run.dispatch_uncertain) {
+      await pool.query(
+        `UPDATE lovable_legacy.organic_run_schedule
+            SET status='dispatch_uncertain',dispatch_uncertain=true,claim_token=NULL,claimed_at=NULL,
+                error_message=$1,retry_count=retry_count+1,completed_at=NULL,updated_at=now()
+          WHERE id=$2::uuid AND status='dispatching' AND provider_order_id IS NULL`,
+        [message, run.id],
+      );
+      await audit(run, "dispatch_uncertain", undefined, { error: message });
+      logger.warn({ runId: run.id, err: message }, "Non-comment dispatch retained for provider confirmation");
       return true;
     }
     await pool.query(
@@ -578,7 +667,7 @@ async function executorTick(): Promise<void> {
   try {
     await pool.query(
       `UPDATE lovable_legacy.organic_run_schedule SET status='dispatch_uncertain',
-          error_message='Comment dispatch interrupted; verify provider acceptance before resending.',updated_at=now()
+          error_message='Dispatch interrupted; verify provider acceptance before resending.',updated_at=now()
         WHERE status='dispatching' AND provider_order_id IS NULL
           AND dispatch_uncertain=true AND claimed_at<now()-interval '2 minutes'`,
     );
@@ -609,7 +698,12 @@ function providerStatus(body: any): string {
 }
 
 function isTerminalStatus(status: string): boolean {
-  return ["completed", "complete", "partial", "canceled", "cancelled", "refunded"].includes(status.toLowerCase());
+  return ["completed", "complete", "partial", "canceled", "cancelled", "refunded", "failed", "failure", "error"].includes(status.toLowerCase());
+}
+
+function optionalProviderNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  return Number.isFinite(Number(value)) ? Number(value) : null;
 }
 
 async function checkRunStatus(run: any): Promise<boolean> {
@@ -665,13 +759,17 @@ async function checkRunStatus(run: any): Promise<boolean> {
 
     const status = providerStatus(body) || String(run.provider_status ?? "Pending");
     const terminal = isTerminalStatus(status);
-    const internalStatus = terminal
-      ? status.toLowerCase().startsWith("partial")
-        ? "partial"
-        : status.toLowerCase().startsWith("cancel") || status.toLowerCase() === "refunded"
-          ? "cancelled"
-          : "completed"
-      : "started";
+    const normalizedStatus = status.toLowerCase();
+    let internalStatus = "started";
+    if (terminal) {
+      if (normalizedStatus.startsWith("partial")) internalStatus = "partial";
+      else if (normalizedStatus.startsWith("cancel") || normalizedStatus === "refunded") internalStatus = "cancelled";
+      else if (["failed", "failure", "error"].includes(normalizedStatus)) internalStatus = "failed";
+      else internalStatus = "completed";
+    }
+    const startCount = optionalProviderNumber(body?.start_count);
+    const remains = optionalProviderNumber(body?.remains);
+    const charge = optionalProviderNumber(body?.charge);
 
     await pool.query(
       `UPDATE lovable_legacy.organic_run_schedule
@@ -684,9 +782,9 @@ async function checkRunStatus(run: any): Promise<boolean> {
         WHERE id=$8::uuid AND provider_order_id=$9`,
       [
         status,
-        Number.isFinite(Number(body?.start_count)) ? Number(body.start_count) : null,
-        Number.isFinite(Number(body?.remains)) ? Number(body.remains) : null,
-        Number.isFinite(Number(body?.charge)) ? Number(body.charge) : null,
+        startCount,
+        remains,
+        charge,
         JSON.stringify(body),
         internalStatus,
         terminal,
@@ -697,8 +795,32 @@ async function checkRunStatus(run: any): Promise<boolean> {
     if (terminal && shouldFailoverCancelledRun({ engagement_type: run.engagement_type, status,
       quantity_to_send: Number(run.quantity_to_send), remains: body?.remains, charge: body?.charge,
       retry_count: run.retry_count })) {
-      // Provider closed the order unpaid with nothing delivered: queue the same
-      // run (same text, same quantity) as a fresh provider order.
+      const timing = await failoverTiming(run);
+      const block = failedRunFailoverBlock({
+        status: internalStatus,
+        providerStatus: status,
+        providerOrderId: run.provider_order_id,
+        quantityToSend: Number(run.quantity_to_send),
+        providerRemains: remains,
+        ...timing,
+        now: new Date(),
+      });
+      if (block) {
+        const message = block === "views-complete"
+          ? "Failover skipped: all views runs and the ordered views total are already complete."
+          : block === "next-run-due"
+            ? "Failover skipped: the following run is already due; the old order was not duplicated."
+            : "Failover skipped: the provider outcome is not safe for automatic replacement.";
+        await pool.query(
+          `UPDATE lovable_legacy.organic_run_schedule SET status='failed',error_message=$1,updated_at=now()
+            WHERE id=$2::uuid AND provider_order_id=$3`,
+          [message, run.id, String(run.provider_order_id)],
+        );
+        await audit(run, "failover_skipped", account, { providerOrderId: String(run.provider_order_id), response: body, error: message });
+        return true;
+      }
+      // Confirmed zero-delivery terminal failure: queue the same run inside
+      // its original curve window and demote every provider already tried.
       await pool.query(
         `UPDATE lovable_legacy.organic_run_schedule
             SET status='pending',provider_order_id=NULL,provider_status=NULL,provider_remains=NULL,
@@ -708,7 +830,7 @@ async function checkRunStatus(run: any): Promise<boolean> {
                 error_message=$2,updated_at=now()
           WHERE id=$3::uuid AND provider_order_id=$4`,
         [Number(run.retry_count ?? 0) === 0 ? 0 : Math.min(10, commentRetryMinutes(Number(run.retry_count ?? 0))),
-          `Provider cancelled order ${run.provider_order_id} with nothing delivered; sending to next priority provider.${cancelledProviderMark(account?.id ?? run.user_provider_account_id)}`,
+          `[failover] Provider ${status} order ${run.provider_order_id} with nothing delivered; sending to an untried priority provider.${appendCancelledProviderMark(run.error_message, account?.id ?? run.user_provider_account_id)}`,
           run.id, String(run.provider_order_id)],
       );
       await audit(run, "cancelled_failover", account, { providerOrderId: String(run.provider_order_id), response: body });
@@ -765,6 +887,113 @@ async function rollupFinishedItemsAndOrders(): Promise<void> {
   );
 }
 
+type DelayedDeliveryRun = {
+  id: string;
+  engagement_order_id: string;
+  order_number: number;
+  user_id: string;
+  user_provider_account_id: string;
+  provider_order_id: string;
+  quantity_to_send: number;
+  provider_remains: number | null;
+  started_at: string;
+  status: string;
+  speedup_ticketed_at: string | null;
+};
+
+/**
+ * Raise one internal Support ticket per delayed provider run. Tickets never
+ * resend, cancel or otherwise modify the paid provider order. Grouping by
+ * Reel order and provider puts multiple delayed IDs in one urgent message.
+ */
+async function processDelayedDeliveryTickets(): Promise<void> {
+  const delayMinutes = speedupTicketDelayMinutes(process.env.DELIVERY_SPEEDUP_TICKET_MINUTES);
+  const candidates = await pool.query<DelayedDeliveryRun>(
+    `SELECT rs.id,eoi.engagement_order_id,eo.order_number,eo.user_id,rs.user_provider_account_id,
+            rs.provider_order_id,rs.quantity_to_send,rs.provider_remains,rs.started_at,rs.status,rs.speedup_ticketed_at
+       FROM lovable_legacy.organic_run_schedule rs
+       JOIN lovable_legacy.engagement_order_items eoi ON eoi.id=rs.engagement_order_item_id
+       JOIN lovable_legacy.engagement_orders eo ON eo.id=eoi.engagement_order_id
+      WHERE rs.status IN ('started','processing')
+        AND rs.provider_order_id IS NOT NULL
+        AND rs.speedup_ticketed_at IS NULL
+        AND rs.started_at<=now()-($1 * interval '1 minute')
+        AND (rs.provider_remains IS NULL OR rs.provider_remains>=rs.quantity_to_send)
+        AND COALESCE(eo.status,'pending') NOT IN ('deleted','cancelled','canceled','completed')
+      ORDER BY rs.started_at
+      LIMIT 100`,
+    [delayMinutes],
+  );
+  const groups = new Map<string, DelayedDeliveryRun[]>();
+  for (const run of candidates.rows) {
+    const key = `${run.user_id}:${run.engagement_order_id}:${run.user_provider_account_id}`;
+    groups.set(key, [...(groups.get(key) ?? []), run]);
+  }
+
+  for (const group of groups.values()) {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const ids = group.map((run) => run.id);
+      const locked = await client.query<DelayedDeliveryRun>(
+        `SELECT rs.id,eoi.engagement_order_id,eo.order_number,eo.user_id,rs.user_provider_account_id,
+                rs.provider_order_id,rs.quantity_to_send,rs.provider_remains,rs.started_at,rs.status,rs.speedup_ticketed_at
+           FROM lovable_legacy.organic_run_schedule rs
+           JOIN lovable_legacy.engagement_order_items eoi ON eoi.id=rs.engagement_order_item_id
+           JOIN lovable_legacy.engagement_orders eo ON eo.id=eoi.engagement_order_id
+          WHERE rs.id=ANY($1::uuid[])
+            AND rs.status IN ('started','processing')
+            AND rs.provider_order_id IS NOT NULL
+            AND rs.speedup_ticketed_at IS NULL
+            AND rs.started_at<=now()-($2 * interval '1 minute')
+            AND (rs.provider_remains IS NULL OR rs.provider_remains>=rs.quantity_to_send)
+            AND COALESCE(eo.status,'pending') NOT IN ('deleted','cancelled','canceled','completed')
+          FOR UPDATE OF rs`,
+        [ids, delayMinutes],
+      );
+      const now = new Date();
+      const eligible = locked.rows.filter((run) => speedupTicketEligible({
+        providerOrderId: run.provider_order_id,
+        status: run.status,
+        startedAt: run.started_at,
+        quantityToSend: Number(run.quantity_to_send),
+        providerRemains: run.provider_remains === null ? null : Number(run.provider_remains),
+        speedupTicketedAt: run.speedup_ticketed_at,
+        now,
+      }, delayMinutes));
+      if (!eligible.length) {
+        await client.query("ROLLBACK");
+        continue;
+      }
+      const first = eligible[0];
+      const message = speedupTicketMessage(eligible.map((run) => run.provider_order_id));
+      const ticket = await client.query<{ id: string }>(
+        `INSERT INTO lovable_legacy.support_tickets
+          (user_id,subject,message,category,priority,status)
+         VALUES ($1,$2,$3,'delivery','high','open') RETURNING id`,
+        [first.user_id, `Urgent delivery speed-up – Engagement Order #${first.order_number}`, message],
+      );
+      const ticketId = ticket.rows[0]?.id;
+      if (!ticketId) throw new Error("Support ticket could not be created.");
+      await client.query(
+        `UPDATE lovable_legacy.organic_run_schedule
+            SET speedup_ticketed_at=now(),speedup_ticket_id=$1::uuid,updated_at=now()
+          WHERE id=ANY($2::uuid[]) AND speedup_ticketed_at IS NULL`,
+        [ticketId, eligible.map((run) => run.id)],
+      );
+      await client.query("COMMIT");
+      logger.info({ ticketId, orderNumber: first.order_number, providerOrderIds: eligible.map((run) => run.provider_order_id) },
+        "Automatic delivery speed-up ticket created");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      logger.error({ err: error instanceof Error ? error.message : "Ticket creation failed", orderNumber: group[0]?.order_number },
+        "Automatic delivery speed-up ticket failed");
+    } finally {
+      client.release();
+    }
+  }
+}
+
 async function checkerTick(): Promise<void> {
   if (checkerRunning) return;
   checkerRunning = true;
@@ -799,6 +1028,11 @@ async function checkerTick(): Promise<void> {
     for (let index = 0; index < batches.length; index += 20) {
       const terminalResults = await Promise.all(batches.slice(index, index + 20).map(checkRunStatus));
       releasedLock = releasedLock || terminalResults.some(Boolean);
+    }
+    try {
+      await processDelayedDeliveryTickets();
+    } catch (error) {
+      logger.error({ err: error instanceof Error ? error.message : "Delayed-ticket pass failed" }, "Delayed-delivery ticket pass failed");
     }
     if (releasedLock) {
       void executorTick();

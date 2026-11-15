@@ -154,7 +154,7 @@ export function LiveStatsBoard({
             </div>
             <div>
               <span className="text-foreground font-bold">{failedRuns} runs failed</span>
-              <p className="text-xs text-muted-foreground">API key errors can be retried after updating keys</p>
+              <p className="text-xs text-muted-foreground">Only safe, unaccepted failures can retry; late or uncertain orders stay stopped</p>
             </div>
           </div>
           {onRetryFailed && (
@@ -169,7 +169,7 @@ export function LiveStatsBoard({
               ) : (
                 <RotateCcw className="h-4 w-4" />
               )}
-              Retry All Failed
+              Retry Safe Failed
             </Button>
           )}
         </div>
