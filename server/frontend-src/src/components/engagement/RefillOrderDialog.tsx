@@ -12,7 +12,7 @@ import { toast } from 'sonner';
 import { CurveSparkline } from '@/components/engagement/CurveSparkline';
 import { scaleRunsToCurve, type PlainRun } from '@/lib/organic-extras';
 import { averageLastCompletedRuns } from '@/lib/refill-plan';
-import { curvePlan, distinctRunList } from '@/lib/curve-plan';
+import { varyRunGaps, curvePlan, distinctRunList } from '@/lib/curve-plan';
 import { applyPeakHours } from '@/lib/peak-hours';
 
 interface Props {
@@ -221,7 +221,7 @@ export function RefillOrderDialog({ orderId, open, onOpenChange, onDone }: Props
         .map((p) => {
           const original: PlainRun[] = (p.item.runs ?? []).map((r: any) => ({ scheduled_at: r.scheduled_at, quantity_to_send: Number(r.quantity_to_send) }));
           const scaled = scaleRunsToCurve(original, p.quantity, startAt, p.min, p.max, Number.isFinite(anchor) ? anchor : undefined);
-          const runs = fitRunsToWindow(scaled, startAt.getTime(), activeHours);
+          const runs = varyRunGaps(fitRunsToWindow(scaled, startAt.getTime(), activeHours), startAt.getTime(), activeHours);
           const peakRuns = applyPeakHours(
             runs.map((run) => ({ ...run, base_quantity: run.quantity_to_send })),
             peakHoursEnabled,

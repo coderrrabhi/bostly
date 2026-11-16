@@ -21,6 +21,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { toast } from "sonner";
+import { Copy } from "lucide-react";
+import { issueProviderOrderIds } from "./providerOrderIds";
 import { driftAdjustmentSummary, runLiveCount, viewsLiveSummary } from "@/lib/run-live-count";
 
 const ENGAGEMENT_CONFIG = {
@@ -247,8 +250,15 @@ export function TypeHistoryCard({
   const isCancelled = itemStatus === 'cancelled';
   const isTerminal = isCancelled || itemStatus === 'completed' || itemStatus === 'failed';
 
+  const issueIds = issueProviderOrderIds(sortedRuns, getEffectiveStatus);
+  const copyIssueIds = async () => {
+    if (!issueIds) { toast.info("No failed, cancelled or processing orders here"); return; }
+    try { await navigator.clipboard.writeText(issueIds); toast.success(`Copied ${issueIds.split(",").length} order ID(s)`); }
+    catch { toast.error("Copy failed"); }
+  };
+
   return (
-    <Card className={`three-d-card overflow-hidden ${isPaused ? 'border-amber-500/30' : ''} ${isCancelled ? 'border-destructive/30 opacity-60' : ''}`}>
+    <Card className={`three-d-card overflow-hidden rounded-2xl shadow-[0_10px_30px_-12px_rgba(99,102,241,.35)] ring-1 ring-violet-200/60 ${isPaused ? 'border-amber-500/30' : ''} ${isCancelled ? 'border-destructive/30 opacity-60' : ''}`}>
       {/* Paused/Cancelled status banner */}
       {isPaused && (
         <div className="flex items-center gap-2 px-4 py-2 bg-amber-500/10 border-b border-amber-500/20">
@@ -275,7 +285,8 @@ export function TypeHistoryCard({
       )}
 
       {/* Header - Service Info */}
-      <div className="p-4 border-b border-border">
+      <div className="h-1.5 bg-gradient-to-r from-blue-500 via-violet-500 to-pink-500" />
+      <div className="p-4 border-b border-border bg-gradient-to-br from-blue-50/70 via-white to-violet-50/70">
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div className="flex items-start gap-3">
             <div className={`flex items-center justify-center w-12 h-12 rounded-lg font-bold text-lg ${isPaused ? 'bg-amber-500/20 text-amber-500 border border-amber-500/30' : isCancelled ? 'bg-white/5 text-white/20 border border-white/10' : 'bg-primary/20 text-primary border border-primary/30'
@@ -310,6 +321,10 @@ export function TypeHistoryCard({
                 <p className="text-sm text-muted-foreground">{formatPrice(servicePrice)}</p>
               )}
             </div>
+
+            <Button variant="outline" size="sm" onClick={() => void copyIssueIds()} title="Copy provider order IDs of failed, cancelled and processing runs" className="h-8 rounded-lg font-semibold text-violet-700 border-violet-300 bg-violet-50 hover:bg-violet-100">
+              <Copy className="h-3.5 w-3.5 mr-1" /> Copy failed/processing{issueIds ? ` (${issueIds.split(",").length})` : ""}
+            </Button>
 
             {/* Per-type control buttons */}
             {itemId && !isTerminal && !isPaused && !isCancelled && (

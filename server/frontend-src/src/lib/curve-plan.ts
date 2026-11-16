@@ -72,7 +72,7 @@ export function distinctQuantities(q: number[], min: number, max = 0): number[] 
 export type SmoothRun = { runNumber: number; timePercent: number; quantity: number; cumulativeQuantity: number };
 
 /**
- * Spread `total` over `runs` evenly spaced slots following the cumulative
+ * Spread `total` over `runs` slots with all-different gaps following the cumulative
  * curve `cum(x)` (x and result in 0-100). Every slot gets the minimum, the
  * rest follows the curve's mass with a small (±8%) variation, so the planned
  * run count is exactly the count sent. Every run has a different quantity.
@@ -85,11 +85,24 @@ export function smoothSchedule(
   if (total <= 0) return [];
   let n = Math.max(1, Math.min(Math.floor(runs), Math.floor(total / min)));
   while (n > 1 && n * min + (n * (n - 1)) / 2 > total) n -= 1;
-  // Monotonic cumulative target (some curves dip, delivery cannot go back).
+  // Run times: every gap between runs is different (random 0.7x-1.3x of the
+  // average gap, never repeating), first run at 0%, all inside the window.
+  const gapW: number[] = [];
+  for (let i = 0; i < n - 1; i += 1) {
+    let w = 0.7 + rng() * 0.6;
+    for (let g = 0; g < 20 && gapW.some((x) => Math.abs(x - w) < 0.004); g += 1) w = 0.7 + rng() * 0.6;
+    gapW.push(w);
+  }
+  const span = n > 1 ? ((n - 0.5) / n) * 100 : 0;
+  const wSum = gapW.reduce((a, b) => a + b, 0) || 1;
+  const times: number[] = [0];
+  for (const w of gapW) times.push(times[times.length - 1] + (w / wSum) * span);
+  // Curve mass for each run is taken at its real time, so the drawn curve follows the selected shape.
   let peak = 0;
   let mass: number[] = [];
-  for (let i = 1; i <= n; i += 1) {
-    const next = Math.max(peak, clamp(cum((i / n) * 100), 0, 100));
+  for (let i = 0; i < n; i += 1) {
+    const edge = i === n - 1 ? 100 : (times[i] + times[i + 1]) / 2;
+    const next = Math.max(peak, clamp(cum(edge), 0, 100));
     mass.push(next - peak);
     peak = next;
   }
@@ -114,8 +127,7 @@ export function smoothSchedule(
   let sent = 0;
   return qs.map((quantity, i) => {
     sent += quantity;
-    const jitter = i === 0 ? 0 : (rng() - 0.5) * 0.4;
-    return { runNumber: i + 1, timePercent: Math.max(0, ((i + jitter) / n) * 100), quantity, cumulativeQuantity: sent };
+    return { runNumber: i + 1, timePercent: Math.min(99.9, times[i]), quantity, cumulativeQuantity: sent };
   });
 }
 
@@ -137,4 +149,41 @@ export function distinctRunList<T extends { quantity: number; runNumber: number 
     list[into] = { ...list[into], quantity: list[into].quantity + list[si].quantity };
     list.splice(si, 1);
   }
+}
+
+/**
+ * Re-time runs so every gap between consecutive runs is different, keeping
+ * the curve's relative spacing (each gap scaled by a unique 0.7x-1.3x
+ * factor) and the run order. First run stays at start; the last run lands
+ * inside the window when `hours` is set. Quantities are untouched.
+ */
+export function varyRunGaps<T extends { scheduled_at: string }>(runs: T[], startMs: number, hours = 0, rng: () => number = Math.random): T[] {
+  if (runs.length <= 2) return runs;
+  const sorted = [...runs].sort((a, b) => Date.parse(a.scheduled_at) - Date.parse(b.scheduled_at));
+  const offs = sorted.map((r) => Math.max(0, Date.parse(r.scheduled_at) - startMs));
+  const first = offs[0];
+  const raw = offs.slice(1).map((o, i) => o - offs[i]);
+  const avg = raw.reduce((a, b) => a + b, 0) / raw.length || 20 * 60_000;
+  const used: number[] = [];
+  const gaps = raw.map((g) => {
+    let w = 0.7 + rng() * 0.6;
+    for (let k = 0; k < 20 && used.some((u) => Math.abs(u - w) < 0.004); k += 1) w = 0.7 + rng() * 0.6;
+    used.push(w);
+    return Math.max(avg * 0.35, g) * w;
+  });
+  let total = gaps.reduce((a, b) => a + b, 0);
+  const limit = hours > 0 ? hours * 3600_000 * 0.95 - first : total;
+  const k = total > 0 && limit > 0 ? limit / total : 1;
+  const scale = hours > 0 ? k : (offs[offs.length - 1] - first) / (total || 1);
+  let t = first;
+  const seen = new Set<number>();
+  return sorted.map((r, i) => {
+    if (i > 0) {
+      let g = Math.max(60_000, Math.round(gaps[i - 1] * scale / 1000) * 1000);
+      while (seen.has(g)) g += 1000;
+      seen.add(g);
+      t += g;
+    }
+    return { ...r, scheduled_at: new Date(startMs + t).toISOString() };
+  });
 }

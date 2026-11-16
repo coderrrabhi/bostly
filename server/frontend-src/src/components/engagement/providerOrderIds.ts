@@ -8,3 +8,9 @@ export function providerOrderIds(runs: any[]): string {
   }
   return ids.join(",");
 }
+
+// Per-Service History "Copy issues": provider ids of runs that are failed,
+// cancelled/refunded or still processing at the provider. Completed and unsent runs are excluded.
+export function issueProviderOrderIds(runs: any[], statusOf: (run: any) => string): string {
+  return providerOrderIds((runs ?? []).filter((run) => ['failed', 'started'].includes(statusOf(run))));
+}

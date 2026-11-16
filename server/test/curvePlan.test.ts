@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 
 const deployed = new URL("../frontend-src/src/lib/", import.meta.url);
 const libFile = (f: string) => (existsSync(new URL(f, deployed)) ? new URL(f, deployed) : new URL(`../../frontend/src/lib/${f}`, import.meta.url)).href;
-const { curvePlan, runsForWindow, smoothSchedule } = await import(libFile("curve-plan.ts"));
+const { curvePlan, runsForWindow, smoothSchedule, varyRunGaps } = await import(libFile("curve-plan.ts"));
 const { averageLastCompletedRuns } = await import(libFile("refill-plan.ts"));
 
 function seeded(seed: number) { return () => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed / 2 ** 31; }; }
@@ -55,4 +55,28 @@ test("every run in a schedule has a different quantity", () => {
     assert.equal(runs.reduce((s, r) => s + r.quantity, 0), total);
     assert.ok(runs.every((r) => r.quantity >= min));
   }
+});
+
+test("every gap between runs is different and stays inside the window", () => {
+  for (const [views, hours] of [[5700, 10], [250000, 32]]) {
+    const runs = smoothSchedule(viral, views, runsForWindow("views", views, hours, 101), 101, seeded(views + 1));
+    const gaps = runs.slice(1).map((r, i) => +(r.timePercent - runs[i].timePercent).toFixed(6));
+    assert.equal(new Set(gaps).size, gaps.length);
+    assert.ok(gaps.every((g) => g > 0));
+    assert.equal(runs[0].timePercent, 0);
+    assert.ok(runs.at(-1).timePercent < 100);
+  }
+});
+
+test("mass/refill re-timing: all gaps different, order kept, inside the window", () => {
+  const start = Date.UTC(2026, 10, 15, 0, 0);
+  const runs = Array.from({ length: 30 }, (_, i) => ({ scheduled_at: new Date(start + i * 20 * 60_000).toISOString(), quantity_to_send: 100 + i }));
+  const out = varyRunGaps(runs, start, 10, seeded(5));
+  const ts = out.map((r) => Date.parse(r.scheduled_at));
+  const gaps = ts.slice(1).map((t, i) => t - ts[i]);
+  assert.equal(new Set(gaps).size, gaps.length);
+  assert.ok(gaps.every((g) => g >= 60_000));
+  assert.equal(ts[0], start);
+  assert.ok(ts.at(-1) <= start + 10 * 3600_000);
+  assert.deepEqual(out.map((r) => r.quantity_to_send), runs.map((r) => r.quantity_to_send));
 });

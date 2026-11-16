@@ -1,4 +1,4 @@
-import { curvePlan } from '@/lib/curve-plan';
+import { varyRunGaps, curvePlan } from '@/lib/curve-plan';
 import { DeliveryStartTime } from '@/components/engagement/DeliveryStartTime';
 import { loadDeliverySettings, deliveryPayload, type DeliverySettings } from '@/lib/order-delivery-settings';
 import { useMemo, useState } from 'react';
@@ -22,6 +22,7 @@ import { coordinateEngagementSchedules, generateOrganicSchedule, generateRandomV
 import { resolveEffectiveMin } from '@/lib/engagement-order-management';
 import { distinctRunList } from '@/lib/curve-plan';
 import { applyPeakHours } from '@/lib/peak-hours';
+import { MASS_CURVE_AUTO, massCurveChoices, massCurvePreset, warpForPreset } from '@/lib/mass-curve-select';
 
 interface Row {
   id: string;
@@ -127,6 +128,9 @@ export default function MassOrder() {
   const [baseQtyMax, setBaseQtyMax] = useState(10000);
   const [defaultsQty, setDefaultsQty] = useState<Record<string, number>>(() => defaultQty(5000));
   const [peakUS, setPeakUS] = useState(false);
+  // 'auto' = every reel gets its own unique seeded curve; otherwise one of the
+  // real-Reel-shaped presets is applied to every reel.
+  const [massCurveId, setMassCurveId] = useState<string>(MASS_CURVE_AUTO);
   const [deliverySettings, setDeliverySettings] = useState<DeliverySettings>(() => loadDeliverySettings());
   const [variance, setVariance] = useState(MIN_VARIANCE_PERCENT);
   const [timeframe, setTimeframe] = useState('Under 24 hours');
@@ -229,8 +233,19 @@ export default function MassOrder() {
     return minOrderFor(t, mins.length ? Math.min(...mins) : undefined);
   };
 
-  // Build each reel's own delivery curve from its seed (same seed = same curve).
-  function buildRuns(types: Record<string, boolean>, qty: Record<string, number>, tf: string, seed: number, peakEnabled = peakUS): { runs: Record<string, ScheduledRun[]>; builtAt: number } {
+  // The curve a reel follows: the selected preset for every reel, or its own
+  // unique seeded curve when "auto" is selected.
+  function activeCurveStyle(seed: number, curveId = massCurveId): { name: string; warp: (x: number) => number } {
+    if (curveId !== MASS_CURVE_AUTO) {
+      const warp = warpForPreset(curveId);
+      const preset = massCurvePreset(curveId);
+      if (warp && preset) return { name: preset.name, warp };
+    }
+    return curveStyleFor(seed);
+  }
+
+  // Build each reel's delivery curve from its seed or the selected preset.
+  function buildRuns(types: Record<string, boolean>, qty: Record<string, number>, tf: string, seed: number, peakEnabled = peakUS, curveId = massCurveId): { runs: Record<string, ScheduledRun[]>; builtAt: number } {
     const hours = timeframeToHours(tf);
     const builtAt = Date.now();
     const start = new Date(builtAt + 5 * 60_000);
@@ -258,8 +273,8 @@ export default function MassOrder() {
         peak_multiplier: run.peakMultiplier,
       }));
     });
-    // Give this reel its own curve shape (fast start, slow burn, viral middle…).
-    const styled = applyCurveStyle(runs, start.getTime(), curveStyleFor(seed));
+    // Give this reel its curve shape (selected preset, or its own seeded style).
+    const styled = applyCurveStyle(runs, start.getTime(), activeCurveStyle(seed, curveId));
     Object.keys(styled).forEach((t) => { runs[t] = styled[t]; });
     // Clean up: drop zero/negative runs and keep the exact total (respecting provider/custom minimum).
     Object.keys(runs).forEach((t) => {
@@ -275,6 +290,8 @@ export default function MassOrder() {
         variance_applied: run.variance_applied,
         peak_multiplier: run.peak_multiplier ?? 1,
       }));
+      // Every gap between this reel's runs is different, still inside the timeframe.
+      runs[t] = varyRunGaps(runs[t], start.getTime(), hours);
     });
     return { runs, builtAt };
   }
@@ -295,14 +312,20 @@ export default function MassOrder() {
     return qty;
   }
 
-  function rebuildRow(r: Row, seed = r.seed, peakEnabled = peakUS): Row {
-    const { runs, builtAt } = buildRuns(r.types, r.qty, r.timeframe, seed, peakEnabled);
+  function rebuildRow(r: Row, seed = r.seed, peakEnabled = peakUS, curveId = massCurveId): Row {
+    const { runs, builtAt } = buildRuns(r.types, r.qty, r.timeframe, seed, peakEnabled, curveId);
     return { ...r, seed, runs, builtAt };
   }
 
   function togglePeakHours(enabled: boolean) {
     setPeakUS(enabled);
     setRows((current) => current.map((row) => rebuildRow(row, row.seed, enabled)));
+  }
+
+  // Switching the curve re-times every previewed reel onto the new shape.
+  function selectMassCurve(id: string) {
+    setMassCurveId(id);
+    setRows((current) => current.map((row) => rebuildRow(row, row.seed, peakUS, id)));
   }
 
   function preview() {
@@ -347,7 +370,9 @@ export default function MassOrder() {
         builtAt,
       };
     }));
-    toast.success(`${parsed.length} link(s) ready — random views, random ratios and a unique curve per reel!`);
+    toast.success(massCurveId === MASS_CURVE_AUTO
+      ? `${parsed.length} link(s) ready — random views, random ratios and a unique curve per reel!`
+      : `${parsed.length} link(s) ready — every reel follows the ${massCurvePreset(massCurveId)?.name ?? 'selected'} curve!`);
   }
 
   function onFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -411,14 +436,14 @@ export default function MassOrder() {
               const baseTime = Date.now() + 5 * 60_000;
               const totalDur = hours * 60 * 60_000;
               const gap = qtys.length > 1 ? totalDur / (qtys.length - 1) : 30 * 60_000;
-              runs = qtys.map((qty, i) => ({
+              runs = varyRunGaps(qtys.map((qty, i) => ({
                 run_number: i + 1,
                 scheduled_at: new Date(baseTime + i * gap).toISOString(),
                 quantity_to_send: qty,
                 base_quantity: qty,
                 variance_applied: 0,
                 peak_multiplier: 1,
-              }));
+              })), baseTime, hours);
               runsTotal = q;
             }
             return {
@@ -463,7 +488,7 @@ export default function MassOrder() {
             bundle_id: null,
             link: r.link,
             order_name: r.order_name.trim(),
-            curve_name: curveStyleFor(r.seed).name,
+            curve_name: activeCurveStyle(r.seed).name,
             base_quantity: r.base_quantity,
             total_price: perRowCost(r),
             is_organic_mode: true,
@@ -609,6 +634,25 @@ export default function MassOrder() {
               })()}
             </div>
           </div>
+          <div className="p-3 rounded-xl bg-secondary border border-border">
+            <Label className="flex items-center gap-1.5"><TrendingUp className="w-4 h-4 text-primary" /> Delivery Curve (all reels)</Label>
+            <select
+              className="w-full h-11 px-3 mt-2 rounded-xl bg-background border border-border text-foreground"
+              value={massCurveId}
+              onChange={e => selectMassCurve(e.target.value)}
+              aria-label="Delivery curve for all reels"
+            >
+              <option value={MASS_CURVE_AUTO}>🎲 Auto — unique curve per reel</option>
+              {massCurveChoices().map((p) => (
+                <option key={p.id} value={p.id}>{p.emoji} {p.name} — {p.description}</option>
+              ))}
+            </select>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              {massCurveId === MASS_CURVE_AUTO
+                ? 'Every reel gets its own different curve automatically.'
+                : `Every reel follows the ${massCurvePreset(massCurveId)?.name ?? 'selected'} curve — a real-Reel shape.`}
+            </p>
+          </div>
           <div className="grid md:grid-cols-2 gap-4">
             <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-secondary border border-border">
               <div className="min-w-0">
@@ -677,7 +721,7 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-lg font-semibold">Preview ({rows.length} Links)</h2>
-                <p className="text-xs text-muted-foreground">Each reel has random views, random ratios, its own delivery curve and custom comments attached.</p>
+                <p className="text-xs text-muted-foreground">{massCurveId === MASS_CURVE_AUTO ? 'Each reel has random views, random ratios, its own delivery curve and custom comments attached.' : `Each reel has random views and ratios; every reel follows the ${massCurvePreset(massCurveId)?.name ?? 'selected'} curve.`}</p>
               </div>
               <span className="px-3 py-1.5 rounded-lg bg-primary/15 text-primary text-sm font-medium">
                 {rows.length} link(s)
@@ -693,14 +737,16 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-primary/10 border border-primary/25 text-primary text-xs font-bold">
                           <TrendingUp className="w-3.5 h-3.5" />
-                          Pattern: {curveStyleFor(r.seed).name} (#{String(r.seed).slice(-4)})
+                          Pattern: {activeCurveStyle(r.seed).name} (#{String(r.seed).slice(-4)})
                         </span>
                         <span className="text-[10px] text-muted-foreground font-mono bg-background/60 px-2 py-0.5 rounded border border-border">
                           {r.runs.views?.length ?? 0} runs
                         </span>
                       </div>
                       <div className="flex items-center gap-1">
-                        <button title="Shuffle pattern / curve" onClick={() => setRows(prev => prev.map(x => x.id === r.id ? rebuildRow(x, newCurveSeed()) : x))} className="text-muted-foreground hover:text-primary p-1"><Shuffle className="w-4 h-4" /></button>
+                        {massCurveId === MASS_CURVE_AUTO && (
+                          <button title="Shuffle pattern / curve" onClick={() => setRows(prev => prev.map(x => x.id === r.id ? rebuildRow(x, newCurveSeed()) : x))} className="text-muted-foreground hover:text-primary p-1"><Shuffle className="w-4 h-4" /></button>
+                        )}
                         <button onClick={() => setEditing(r)} className="text-muted-foreground hover:text-primary p-1"><Pencil className="w-4 h-4" /></button>
                         <button onClick={() => setRows(rows.filter(x => x.id !== r.id))} className="text-muted-foreground hover:text-destructive p-1"><Trash2 className="w-4 h-4" /></button>
                       </div>
@@ -738,7 +784,7 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                     {(r.runs.views?.length ?? 0) > 0 && (
                       <div className="mt-3 rounded-lg border border-border bg-background/60 px-2 pt-1">
                         <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-                          <span>{curveStyleFor(r.seed).name} curve #{String(r.seed).slice(-4)} · {r.runs.views.length} runs</span>
+                          <span>{activeCurveStyle(r.seed).name} curve #{String(r.seed).slice(-4)} · {r.runs.views.length} runs</span>
                           <span>{peakUS ? '🔥 USA peak' : ''} ±{variance}%</span>
                         </div>
                         <CurveSparkline runs={r.runs.views} height={40} />
@@ -777,18 +823,20 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                     <TrendingUp className="w-4 h-4" /> Assigned Delivery Curve / Pattern
                   </Label>
                   <p className="text-sm font-bold text-foreground mt-0.5">
-                    {curveStyleFor(editing.seed).name} <span className="text-xs font-mono text-muted-foreground">(#{String(editing.seed).slice(-4)})</span>
+                    {activeCurveStyle(editing.seed).name} <span className="text-xs font-mono text-muted-foreground">(#{String(editing.seed).slice(-4)})</span>
                   </p>
                 </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-8 gap-1.5 text-xs border-primary/30 text-primary hover:bg-primary/10"
-                  onClick={() => setEditing(rebuildRow(editing, newCurveSeed()))}
-                >
-                  <Shuffle className="w-3.5 h-3.5" /> Shuffle Pattern
-                </Button>
+                {massCurveId === MASS_CURVE_AUTO && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-1.5 text-xs border-primary/30 text-primary hover:bg-primary/10"
+                    onClick={() => setEditing(rebuildRow(editing, newCurveSeed()))}
+                  >
+                    <Shuffle className="w-3.5 h-3.5" /> Shuffle Pattern
+                  </Button>
+                )}
               </div>
               <div>
                 <Label htmlFor="edit-order-name">Order Name</Label>

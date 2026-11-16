@@ -910,25 +910,10 @@ export default function EngagementOrderDetail() {
           onCancelType={(itemId) => cancelItemMutation.mutate(itemId)}
         />
 
-        {/* SECTION 1: Merged Organic Timeline */}
-        <div className="space-y-2">
-          <h2 className="text-lg font-semibold flex items-center gap-2">
-            Run Schedule 
-            <Badge variant="outline">{stats.allRuns.length} total runs</Badge>
-          </h2>
-        <MergedTimeline
-            runs={stats.allRuns}
-            onEditRun={handleEditRun}
-            nextRun={stats.nextRun}
-            onRefresh={() => refetch()}
-            typeTargets={stats.perType}
-          />
-        </div>
-
         {/* SECTION 2: Per-Service History Cards */}
         <div className="space-y-4">
-          <h2 className="text-lg font-semibold flex items-center gap-2">
-            <BarChart3 className="h-5 w-5 text-primary" /> Per-Service History
+          <h2 className="text-lg font-extrabold flex items-center gap-2 bg-gradient-to-r from-blue-600 via-violet-600 to-pink-500 bg-clip-text text-transparent">
+            <BarChart3 className="h-5 w-5 text-violet-600" /> Per-Service History
             <span className="text-sm font-normal text-muted-foreground">
               (Edit from here or merged timeline - both sync automatically)
             </span>

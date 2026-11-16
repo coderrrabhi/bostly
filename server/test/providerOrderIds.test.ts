@@ -38,3 +38,15 @@ test('an empty section copies nothing instead of a blank or header line', () => 
   assert.equal(providerOrderIds([]), '');
   assert.equal(providerOrderIds(undefined as any), '');
 });
+
+const { issueProviderOrderIds } = await import(componentFile('providerOrderIds.ts'));
+
+test('copy issues takes only failed/cancelled and processing provider ids', () => {
+  const runs = [
+    { provider_order_id: '1', s: 'completed' },
+    { provider_order_id: '2', s: 'failed' },
+    { provider_order_id: '3', s: 'started' },
+    { provider_order_id: null, s: 'pending' },
+  ];
+  assert.equal(issueProviderOrderIds(runs, (r: any) => r.s), '2,3');
+});

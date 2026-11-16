@@ -15,7 +15,11 @@ export default mergeConfig(base, {
   }), require('autoprefixer')()] } },
   plugins: [{
     name: 'boostbotting-dashboard-patches', enforce: 'pre',
-    resolveId(id: string) {
+    async resolveId(id: string, importer?: string) {
+      // Bare package imports from patch files resolve from the artifact's own node_modules.
+      if (importer?.startsWith(sourceRoot) && !/^(\.|\/|@\/|\0)/.test(id)) {
+        return this.resolve(id, path.join(artifact, 'src/main.tsx'), { skipSelf: true });
+      }
       const marker = '/artifacts/boostly-pro/src/';
       const index = id.indexOf(marker);
       const relative = id.startsWith('@/') ? id.slice(2) : index >= 0 ? id.slice(index + marker.length) : null;

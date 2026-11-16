@@ -1185,7 +1185,7 @@ export default function EngagementOrder() {
                 </span>
               </div>
               <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
-                <span>⏱ Pacing: ~1 run every {Math.max(2, Math.round((activeTimeframeHours * 60) / Math.max(1, autoCalculatedRuns)))} mins</span>
+                <span>⏱ Pacing: every gap different · ~{Math.max(1, Math.round((activeTimeframeHours * 60 * 0.7) / Math.max(1, autoCalculatedRuns)))}–{Math.max(2, Math.round((activeTimeframeHours * 60 * 1.3) / Math.max(1, autoCalculatedRuns)))} mins</span>
                 <span>•</span>
                 <span>Total: {activeTimeframeHours}h</span>
               </div>
