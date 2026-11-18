@@ -120,7 +120,7 @@ const engagementSchema = z.object({
   quantity: z.coerce.number().int().positive(),
   user_service_id: z.string().uuid().nullable().optional(),
   user_bundle_item_id: z.string().uuid().nullable().optional(),
-  provider_mappings: z.array(providerMappingSchema).min(1),
+  provider_mappings: z.array(providerMappingSchema).default([]),
   scheduled_runs: z.array(scheduledRunSchema).optional(),
   custom_comments: z.string().optional(),
 });
@@ -229,10 +229,13 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
           (mapping) => `${mapping.user_provider_account_id}:${mapping.provider_service_id}`,
         ),
       );
-      const matched = allowed.rows.filter((row) =>
+      // The order page may hold a stale provider list (My Bundles edited after
+      // load). Live enabled My Bundles mappings are the source of truth.
+      const picked = allowed.rows.filter((row) =>
         requested.has(`${row.user_provider_account_id}:${row.provider_service_id}`),
       );
-      if (!matched.length) throw new Error(`${engagement.type} has no active provider mapping.`);
+      const matched = picked.length ? picked : allowed.rows;
+      if (!matched.length) throw new Error(`${engagement.type} has no enabled provider in My Bundles. Enable one provider for ${engagement.type} and try again.`);
 
       const services = matched.filter((row) => row.user_service_id);
       const pricedServices = services.filter((row) => Number(row.rate) > 0);

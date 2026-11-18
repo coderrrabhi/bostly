@@ -8,7 +8,34 @@
   --radius: 0.9rem;
   --shadow-soft: 0 1px 2px rgba(15,23,42,.04), 0 12px 32px -14px rgba(99,102,241,.28);
   --bb-gradient: linear-gradient(120deg, #3b82f6 0%, #6366f1 35%, #a855f7 70%, #ec4899 100%);
+  --bb-chart-views: #1664eb;
+  --bb-chart-likes: #d91b79;
+  --bb-chart-comments: #008363;
+  --bb-chart-saves: #b76800;
+  --bb-chart-shares: #8035d5;
+  --bb-chart-reposts: #527d00;
+  --bb-chart-other: #087f98;
 }
+.dark {
+  --bb-chart-views: #70acff;
+  --bb-chart-likes: #ff7ab9;
+  --bb-chart-comments: #49d9ad;
+  --bb-chart-saves: #ffc35c;
+  --bb-chart-shares: #c194ff;
+  --bb-chart-reposts: #c0e86c;
+  --bb-chart-other: #67d5ee;
+}
+.bb-chart-label { color: var(--bb-chart-other); display: inline-flex; align-items: center; gap: .3rem; }
+.bb-chart-label[data-engagement="views"] { color: var(--bb-chart-views); }
+.bb-chart-label[data-engagement="likes"] { color: var(--bb-chart-likes); }
+.bb-chart-label[data-engagement="comments"] { color: var(--bb-chart-comments); }
+.bb-chart-label[data-engagement="saves"] { color: var(--bb-chart-saves); }
+.bb-chart-label[data-engagement="shares"] { color: var(--bb-chart-shares); }
+.bb-chart-label[data-engagement="reposts"] { color: var(--bb-chart-reposts); }
+.bb-chart-key { display: inline-block; width: 1rem; height: 0; border-top: 3px solid currentColor; }
+.bb-chart-label[data-engagement="saves"] .bb-chart-key,
+.bb-chart-label[data-engagement="shares"] .bb-chart-key,
+.bb-chart-label[data-engagement="reposts"] .bb-chart-key { border-top-style: dashed; }
 body {
   background:
     radial-gradient(1100px 600px at 0% -10%, rgba(59,130,246,.10), transparent 60%),

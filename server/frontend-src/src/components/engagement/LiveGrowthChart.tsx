@@ -1,3 +1,4 @@
+import { istClock } from "@/lib/run-live-count";
 import { useMemo } from "react";
 import { format } from "date-fns";
 import { Activity, Clock, RefreshCw, TrendingUp, Waves, Zap } from "lucide-react";
@@ -162,7 +163,7 @@ export function LiveGrowthChart({
                     axisLine={false}
                     tickCount={6}
                     minTickGap={28}
-                    tickFormatter={(timestamp) => format(new Date(Number(timestamp)), "HH:mm")}
+                    tickFormatter={(timestamp) => istClock(Number(timestamp))}
                   />
                   <YAxis
                     stroke="hsl(var(--muted-foreground))"
@@ -179,7 +180,7 @@ export function LiveGrowthChart({
                       return (
                         <div className="bg-background/95 backdrop-blur-sm border border-border rounded-lg p-3 shadow-xl">
                           <p className="text-xs text-muted-foreground mb-2 font-mono">
-                            {Number.isFinite(timestamp) ? format(new Date(timestamp), "dd MMM, HH:mm") : String(label)}
+                            {Number.isFinite(timestamp) ? istClock(timestamp, true) + " IST" : String(label)}
                           </p>
                           {payload.filter((entry) => Number(entry.value) > 0).map((entry) => {
                             const type = String(entry.dataKey);

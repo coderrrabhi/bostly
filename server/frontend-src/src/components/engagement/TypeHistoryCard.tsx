@@ -24,7 +24,7 @@ import {
 import { toast } from "sonner";
 import { Copy } from "lucide-react";
 import { issueProviderOrderIds } from "./providerOrderIds";
-import { driftAdjustmentSummary, runLiveCount, viewsLiveSummary } from "@/lib/run-live-count";
+import { driftAdjustmentSummary, runLiveCount, viewsLiveSummary, formatIST, formatGap, runGaps, extraViewsAfterRun } from "@/lib/run-live-count";
 
 const ENGAGEMENT_CONFIG = {
   views: { icon: Eye, label: "Views" },
@@ -229,6 +229,10 @@ export function TypeHistoryCard({
     };
   })) : null;
 
+  const gaps = runGaps(sortedRuns);
+  const extraAfter = engagementType === 'views'
+    ? extraViewsAfterRun(runsWithSchedule.map((run) => ({ run_number: run.run_number, startCount: run.provider_start_count ?? null, delivered: run.actualDeliveredThisRun })))
+    : {};
   const adjustmentSummary = driftAdjustmentSummary(sortedRuns.map((run) => run.drift_adjustment));
   const followsViewsDrift = !['views', 'comments'].includes(engagementType);
 
@@ -596,23 +600,37 @@ export function TypeHistoryCard({
                             </span>
                           )}
                           <span className="flex items-center gap-1">
-                            Scheduled: {format(scheduledDate, 'MMM d, hh:mm a')}
+                            Scheduled: {formatIST(scheduledDate, true)}
                             <span className={`ml-1 font-medium ${isActive ? 'text-blue-400' : isPastDue ? 'text-amber-500' : 'text-teal-400'}`}>
-                              ({isActive ? `${relativeTime} ago` : isPastDue ? `${relativeTime} ago` : `in ${relativeTime}`})
+                              ({isPastDue ? `delayed ${relativeTime} — waiting to send` : scheduledDate < now ? `${relativeTime} ago` : `in ${relativeTime}`})
                             </span>
                           </span>
 
                           {run.started_at && (
                             <span className="flex items-center gap-1 text-blue-400">
                               <Play className="h-3 w-3" />
-                              Started: {format(new Date(run.started_at), 'hh:mm a')}
+                              Started: {formatIST(run.started_at)}
                             </span>
                           )}
 
                           {run.completed_at && (
                             <span className="flex items-center gap-1 text-blue-400">
                               <CheckCircle2 className="h-3 w-3" />
-                              Done: {format(new Date(run.completed_at), 'hh:mm a')}
+                              Done: {formatIST(run.completed_at)}
+                            </span>
+                          )}
+
+                          {formatGap(gaps[run.run_number]?.planned ?? null) && (
+                            <span className="flex items-center gap-1 text-violet-400" title="Gap before this run">
+                              <Clock className="h-3 w-3" />
+                              Gap after #{run.run_number - 1}: {formatGap(gaps[run.run_number]?.planned ?? null)}
+                              {formatGap(gaps[run.run_number]?.actual ?? null) && <span className="text-muted-foreground">(actual {formatGap(gaps[run.run_number]?.actual ?? null)})</span>}
+                            </span>
+                          )}
+
+                          {engagementType === 'views' && (extraAfter as Record<number, number | null>)[run.run_number] != null && (
+                            <span className="font-semibold text-emerald-500" title="Reel views gained after this run beyond provider delivery (next provider start count minus this run's end count)">
+                              Extra views after run: +{Number((extraAfter as Record<number, number | null>)[run.run_number]).toLocaleString()}
                             </span>
                           )}
                         </div>

@@ -685,7 +685,8 @@ export default function EngagementOrder() {
         .filter((entry) => entry.providerMappings.length === 0)
         .map((entry) => entry.type);
 
-      if (missingProviders.length > 0) {
+      // Server re-reads live My Bundles providers; a stale empty list here is not final.
+      if (false && missingProviders.length > 0) {
         throw new Error(`${missingProviders.join(', ')} provider service IDs are not mapped. Please save them in My Bundles.`);
       }
 

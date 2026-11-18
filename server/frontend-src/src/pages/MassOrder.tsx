@@ -473,7 +473,8 @@ export default function MassOrder() {
 
         if (!engagements.length) { fail++; continue; }
         const missingMapping = engagements.find((engagement) => engagement.provider_mappings.length === 0);
-        if (missingMapping) {
+        // Server re-reads live My Bundles providers; a stale empty list is not final.
+        if (false && missingMapping) {
           firstError ||= `${missingMapping.type} has no provider service mapped. Configure it in My Bundles.`;
           fail++;
           continue;

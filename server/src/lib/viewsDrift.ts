@@ -44,6 +44,7 @@ export function viewsDrift(runs: ViewsRun[]): { ordered: number; extra: number }
 export function driftAdjustment(opts: {
   views: ViewsRun[]; viewsTotal: number; itemQuantity: number; appliedSoFar: number;
   runQuantity: number; min: number; max: number; lastRun: boolean;
+  remainingBase?: number;
 }): number {
   if (!(opts.viewsTotal > 0) || !(opts.itemQuantity > 0)) return 0;
   const d = viewsDrift(opts.views);
@@ -51,8 +52,12 @@ export function driftAdjustment(opts: {
   const owed = Math.round((opts.itemQuantity / opts.viewsTotal) * d.extra) - opts.appliedSoFar;
   // Never force the remaining debt into the final run: that created a sudden
   // 2x spike. Every run, final included, moves by at most half its curve size.
-  const up = Math.max(1, Math.round(opts.runQuantity * 0.5));
-  let adj = Math.max(-(opts.runQuantity - Math.max(1, opts.min)), Math.min(up, owed));
+  const up = Math.floor(opts.runQuantity * 0.5);
+  // Spread outstanding ratio debt in proportion to the remaining saved curve
+  // quantities, rather than clearing all debt in the next (possibly tiny) run.
+  const weighted = opts.remainingBase && opts.remainingBase > 0
+    ? Math.round(owed * Math.min(1, opts.runQuantity / opts.remainingBase)) : owed;
+  let adj = Math.max(-Math.min(up, opts.runQuantity - Math.max(1, opts.min)), Math.min(up, weighted));
   if (opts.max > 0) adj = Math.min(adj, opts.max - opts.runQuantity);
   return adj;
 }

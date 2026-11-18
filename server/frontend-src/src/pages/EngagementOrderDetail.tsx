@@ -1,3 +1,4 @@
+import { istClock } from "@/lib/run-live-count";
 import { useState, useMemo, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -985,7 +986,7 @@ export default function EngagementOrderDetail() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
               <div>
                 <p className="text-muted-foreground">Created</p>
-                <p className="font-medium text-foreground">{format(new Date(order.created_at), 'MMM d, yyyy HH:mm')}</p>
+                <p className="font-medium text-foreground">{istClock(order.created_at, true) + ' IST'}</p>
               </div>
               <div>
                 <p className="text-muted-foreground">Botting Score</p>

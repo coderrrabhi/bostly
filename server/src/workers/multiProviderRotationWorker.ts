@@ -8,11 +8,15 @@ import { driftAdjustment, nearestUnused } from "../lib/viewsDrift";
 import { appendCancelledProviderMark, commentRetryMinutes, isCommentEngagement, preferOtherProvider, runCommentText, shouldFailoverCancelledRun } from "../lib/commentDelivery";
 import { failedRunFailoverBlock, failoverWindowBlock } from "../lib/failoverPolicy";
 import { speedupTicketDelayMinutes, speedupTicketEligible, speedupTicketMessage } from "../lib/deliverySpeedup";
+import { engagementViewsAllowed, eligibleProviders } from "../lib/dispatchEligibility";
+import { requestNeverReachedProvider } from "../lib/providerNetwork";
 
 type Mapping = {
   user_provider_account_id: string;
   provider_service_id: string;
   priority?: number;
+  min_quantity?: number | null;
+  max_quantity?: number | null;
 };
 
 type ProviderAccount = {
@@ -24,7 +28,15 @@ type ProviderAccount = {
 };
 
 let executorRunning = false;
+let executorStartedAt = 0;
+/** A hung tick must never stop all deliveries; unsent claims expire safely after 2 minutes. */
+const EXECUTOR_STALL_MS = 3 * 60_000;
+const RUN_STEP_TIMEOUT_MS = 90_000;
+export function executorStalled(running: boolean, startedAt: number, now = Date.now()): boolean {
+  return running && now - startedAt > EXECUTOR_STALL_MS;
+}
 let checkerRunning = false;
+let checkerStartedAt = 0;
 
 function boundedPositiveInt(value: string | undefined, fallback: number, maximum: number): number {
   const parsed = Number(value);
@@ -260,6 +272,10 @@ async function applyViewsDrift(run: any): Promise<void> {
                   AND (o.provider_order_id IS NOT NULL OR o.status IN ('completed','partial','started','processing'))) AS applied,
               NOT EXISTS (SELECT 1 FROM lovable_legacy.organic_run_schedule o
                 WHERE o.engagement_order_item_id=me.id AND o.id<>$1::uuid AND o.status='pending') AS last_run,
+              (SELECT COALESCE(SUM(GREATEST(0,o.quantity_to_send-COALESCE(o.drift_adjustment,0))),0)
+                 FROM lovable_legacy.organic_run_schedule o
+                WHERE o.engagement_order_item_id=me.id AND o.id<>$1::uuid
+                  AND o.provider_order_id IS NULL AND o.status IN ('pending','dispatching')) AS remaining_base,
               vi.id AS views_item
          FROM lovable_legacy.engagement_order_items me
          JOIN lovable_legacy.engagement_order_items vi
@@ -293,6 +309,7 @@ async function applyViewsDrift(run: any): Promise<void> {
       }),
       viewsTotal: Number(row.views_total), itemQuantity: Number(row.item_quantity), appliedSoFar: Number(row.applied),
       runQuantity: planned, min: Number(row.min_q) || 1, max: Number(row.max_q) || 0, lastRun: Boolean(row.last_run),
+      remainingBase: Number(row.remaining_base) + planned,
     });
     const siblings = await pool.query(
       `SELECT quantity_to_send FROM lovable_legacy.organic_run_schedule
@@ -301,8 +318,11 @@ async function applyViewsDrift(run: any): Promise<void> {
       [run.engagement_order_item_id, run.id],
     );
     // Never send the same quantity as another run of this engagement.
-    const quantity = nearestUnused(planned + adj, siblings.rows.map((r) => Number(r.quantity_to_send)),
-      Number(row.min_q) || 1, Number(row.max_q) || 0);
+    const cap = Math.floor(planned * 0.5);
+    const lower = Math.max(Number(row.min_q) || 1, planned - cap);
+    const upper = Math.max(lower, Math.min(Number(row.max_q) || Infinity, planned + cap));
+    const quantity = nearestUnused(Math.max(lower, Math.min(upper, planned + adj)),
+      siblings.rows.map((r) => Number(r.quantity_to_send)), lower, upper);
     const finalAdj = quantity - planned;
     if (finalAdj === own) return;
     await pool.query(
@@ -372,19 +392,27 @@ async function failoverDispatchAllowed(run: any): Promise<boolean> {
 
 async function dispatch(run: any): Promise<void> {
   if (!(await failoverDispatchAllowed(run))) return;
+  if (!(await confirmedViewsDispatchAllowed(run))) return;
   await applyViewsDrift(run);
   // Validate before taking a provider lock or making any paid request.
   const comments = runCommentText(run);
   const mappings = await currentMappings(run);
   const accounts = await loadAccounts(mappings);
-  const ordered = preferOtherProvider(mappings
+  const active = mappings
     .filter((mapping) => mapping.user_provider_account_id && mapping.provider_service_id && accounts.has(mapping.user_provider_account_id))
     .sort((left, right) => {
       const mappingPriority = Number(left.priority ?? 999) - Number(right.priority ?? 999);
       if (mappingPriority !== 0) return mappingPriority;
       return Number(accounts.get(left.user_provider_account_id)?.priority ?? 999) -
         Number(accounts.get(right.user_provider_account_id)?.priority ?? 999);
-    }), run.prev_error);
+    });
+  const checked = await mappingsWithLimits(active, accounts);
+  const ordered = preferOtherProvider(eligibleProviders(checked, Number(run.quantity_to_send)), run.prev_error);
+
+  if (active.length && !ordered.length) {
+    await holdUnsentRun(run, "Waiting for an enabled provider with verified limits that accept this exact run quantity.");
+    return;
+  }
 
   if (!ordered.length) {
     const message = "No active provider account is currently mapped to this service.";
@@ -486,6 +514,18 @@ async function dispatch(run: any): Promise<void> {
       text = await response.text();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Provider request failed.";
+      if (requestNeverReachedProvider(error)) {
+        // Provider site unreachable: no paid request left this server, so try the next priority provider.
+        await pool.query(`UPDATE lovable_legacy.organic_run_schedule SET dispatch_uncertain=false WHERE id=$1::uuid`, [run.id]);
+        run.dispatch_uncertain = false;
+        const code = String((error as any)?.cause?.code ?? (error as any)?.code ?? "unreachable");
+        failures.push(`${account.name}: provider unreachable (${code})`);
+        unavailableCount += 1;
+        await audit(run, "provider_unreachable", account, { request: requestPayload, error: `${message} (${code})` });
+        logger.warn({ runId: run.id, providerAccountId: account.id, code }, "Provider unreachable; trying next priority provider");
+        await releaseAttempt(run.id);
+        continue;
+      }
       await pool.query(
         `UPDATE lovable_legacy.organic_run_schedule
             SET status='dispatch_uncertain',dispatch_uncertain=true,error_message=$1,updated_at=now()
@@ -595,7 +635,7 @@ async function dispatch(run: any): Promise<void> {
   }
 
   if (unavailableCount > 0) {
-    const message = "Provider credentials require attention. Run remains queued until an account is reactivated.";
+    const message = "Provider unreachable or needs attention; run stays queued and retries automatically.";
     const retryMinutes = retryDelayMinutes(Number(run.retry_count ?? 0), 5);
     await pool.query(
       `UPDATE lovable_legacy.organic_run_schedule
@@ -610,6 +650,96 @@ async function dispatch(run: any): Promise<void> {
   }
 
   throw new Error(failures.join(" | ") || "No active provider accepted this run.");
+}
+
+async function holdUnsentRun(run: any, message: string): Promise<void> {
+  await pool.query(
+    `UPDATE lovable_legacy.organic_run_schedule
+        SET status='pending',claim_token=NULL,claimed_at=NULL,rotation_lock_key=NULL,
+            user_provider_account_id=NULL,user_provider_account_name=NULL,error_message=$1,
+            scheduled_at=now()+interval '1 minute',updated_at=now()
+      WHERE id=$2::uuid AND status='dispatching' AND provider_order_id IS NULL`,
+    [message, run.id],
+  );
+}
+
+/** Confirmed provider delivery, never scheduled or merely accepted Views. */
+async function confirmedViewsDispatchAllowed(run: any): Promise<boolean> {
+  if (/views?$/i.test(String(run.engagement_type))) return true;
+  const result = await pool.query(
+    `SELECT me.quantity AS item_total,vi.quantity AS views_total,
+       COALESCE((SELECT SUM(CASE
+         WHEN vr.provider_remains IS NOT NULL THEN GREATEST(0,vr.quantity_to_send-vr.provider_remains)
+         WHEN vr.status='completed' THEN vr.quantity_to_send ELSE 0 END)
+         FROM lovable_legacy.organic_run_schedule vr
+         WHERE vr.engagement_order_item_id=vi.id AND vr.provider_order_id IS NOT NULL
+           AND vr.status NOT IN ('pending','dispatching','merged','dispatch_uncertain')),0) AS views_delivered,
+       COALESCE((SELECT SUM(GREATEST(0,s.quantity_to_send-COALESCE(s.drift_adjustment,0)))
+         FROM lovable_legacy.organic_run_schedule s
+         WHERE s.engagement_order_item_id=me.id AND s.id<>$1::uuid
+           AND (s.provider_order_id IS NOT NULL OR s.status IN ('dispatching','dispatch_uncertain'))),0) AS sent_base
+     FROM lovable_legacy.engagement_order_items me
+     LEFT JOIN lovable_legacy.engagement_order_items vi
+       ON vi.engagement_order_id=me.engagement_order_id AND vi.engagement_type ~* 'views?$'
+     WHERE me.id=$2::uuid LIMIT 1`,
+    [run.id, run.engagement_order_item_id],
+  );
+  const row = result.rows[0];
+  const allowed = engagementViewsAllowed({ type: String(run.engagement_type),
+    viewsTotal: Number(row?.views_total || 0), viewsDelivered: Number(row?.views_delivered || 0),
+    itemTotal: Number(row?.item_total || 0), alreadySentBase: Number(row?.sent_base || 0),
+    runBase: Math.max(0, Number(run.quantity_to_send) - Number(run.drift_adjustment || 0)) });
+  if (!allowed) await holdUnsentRun(run, 'Waiting for confirmed Views delivery required by this engagement ratio.');
+  return allowed;
+}
+
+// Imported catalog is refreshed by My Providers. Unimported service IDs use a
+// read-only services lookup; never probe minimums by creating a paid order.
+/**
+ * Attach verified provider min/max when known. Unknown limits must never stop
+ * delivery: the mapping is kept unchanged and an explicit provider rejection
+ * still fails over safely. Only a verified incompatible limit filters it out.
+ */
+async function mappingsWithLimits(mappings: Mapping[], accounts: Map<string, ProviderAccount>): Promise<Mapping[]> {
+  const result: Mapping[] = [];
+  const catalogs = new Map<string, any[] | null>();
+  for (const mapping of mappings) {
+    let limits: any = null;
+    try {
+      const cached = await pool.query(
+        `SELECT min_quantity,max_quantity FROM lovable_legacy.user_services
+          WHERE user_provider_account_id=$1::uuid AND provider_service_id=$2 AND is_active=true LIMIT 1`,
+        [mapping.user_provider_account_id, mapping.provider_service_id],
+      );
+      limits = cached.rows[0] ?? null;
+      if (!limits || limits.min_quantity == null) {
+        const account = accounts.get(mapping.user_provider_account_id);
+        let catalog = account ? catalogs.get(account.id) : null;
+        if (account && catalog === undefined) {
+          catalog = null;
+          try {
+            const response = await fetch(safePanelUrl(account.api_url), {
+              method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: new URLSearchParams({ key: decryptProviderCredential(account.api_key_ciphertext), action: 'services' }),
+              signal: AbortSignal.timeout(8000),
+            });
+            const body = response.ok ? await response.json() : null;
+            if (Array.isArray(body)) catalog = body;
+          } catch (error) {
+            logger.warn({ runProvider: account.id, error: String(error) }, 'Provider limits unavailable; dispatching without limit filter');
+          }
+          catalogs.set(account.id, catalog);
+        }
+        const service = catalog?.find((s: any) => String(s.service ?? s.id) === mapping.provider_service_id);
+        limits = service ? { min_quantity: service.min, max_quantity: service.max } : null;
+      }
+    } catch { limits = null; }
+    const min = Number(limits?.min_quantity);
+    const max = Number(limits?.max_quantity);
+    const known = Number.isFinite(min) && min >= 1 && Number.isFinite(max) && max >= min;
+    result.push(known ? { ...mapping, min_quantity: min, max_quantity: max } : { ...mapping, min_quantity: null, max_quantity: null });
+  }
+  return result;
 }
 
 async function processNextRun(): Promise<boolean> {
@@ -662,8 +792,14 @@ async function processNextRun(): Promise<boolean> {
 }
 
 async function executorTick(): Promise<void> {
-  if (executorRunning) return;
+  if (executorRunning && !executorStalled(executorRunning, executorStartedAt)) return;
+  if (executorRunning) logger.error({ stalledMs: Date.now() - executorStartedAt }, "Rotation executor stalled; starting a fresh tick");
+  if (pool.waitingCount > 0 || pool.idleCount + pool.waitingCount === 0 && pool.totalCount > 0) {
+    logger.warn({ total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount }, "Worker DB pool busy");
+  }
   executorRunning = true;
+  const myStart = Date.now();
+  executorStartedAt = myStart;
   try {
     await pool.query(
       `UPDATE lovable_legacy.organic_run_schedule SET status='dispatch_uncertain',
@@ -683,13 +819,18 @@ async function executorTick(): Promise<void> {
     );
     await Promise.all(Array.from({ length: EXECUTOR_CONCURRENCY }, async () => {
       for (let count = 0; count < RUNS_PER_EXECUTOR; count += 1) {
-        if (!(await processNextRun())) break;
+        const step = await Promise.race([
+          processNextRun(),
+          new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), RUN_STEP_TIMEOUT_MS).unref()),
+        ]);
+        if (step === "timeout") { logger.error("Run dispatch step exceeded time limit; moving on"); break; }
+        if (!step) break;
       }
     }));
   } catch (error) {
     logger.error({ err: error instanceof Error ? error.message : "Executor tick failed" }, "Rotation executor tick failed");
   } finally {
-    executorRunning = false;
+    if (executorStartedAt === myStart) executorRunning = false;
   }
 }
 
@@ -995,8 +1136,11 @@ async function processDelayedDeliveryTickets(): Promise<void> {
 }
 
 async function checkerTick(): Promise<void> {
-  if (checkerRunning) return;
+  if (checkerRunning && !executorStalled(checkerRunning, checkerStartedAt)) return;
+  if (checkerRunning) logger.error({ stalledMs: Date.now() - checkerStartedAt }, "Status checker stalled; starting a fresh tick");
   checkerRunning = true;
+  const myStart = Date.now();
+  checkerStartedAt = myStart;
   try {
     await rollupFinishedItemsAndOrders();
     const result = await pool.query(
@@ -1040,7 +1184,7 @@ async function checkerTick(): Promise<void> {
   } catch (error) {
     logger.error({ err: error instanceof Error ? error.message : "Status checker tick failed" }, "Provider status checker tick failed");
   } finally {
-    checkerRunning = false;
+    if (checkerStartedAt === myStart) checkerRunning = false;
   }
 }
 

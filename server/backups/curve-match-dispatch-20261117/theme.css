@@ -1,0 +1,69 @@
+/* boostbotting.site premium colourful theme layer (overrides artifact tokens, no layout changes) */
+:root {
+  --background: 228 45% 97%;
+  --primary: 238 84% 60%;
+  --accent: 262 83% 62%;
+  --ring: 262 83% 62%;
+  --border: 230 30% 90%;
+  --radius: 0.9rem;
+  --shadow-soft: 0 1px 2px rgba(15,23,42,.04), 0 12px 32px -14px rgba(99,102,241,.28);
+  --bb-gradient: linear-gradient(120deg, #3b82f6 0%, #6366f1 35%, #a855f7 70%, #ec4899 100%);
+}
+body {
+  background:
+    radial-gradient(1100px 600px at 0% -10%, rgba(59,130,246,.10), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(236,72,153,.08), transparent 60%),
+    radial-gradient(900px 700px at 50% 110%, rgba(168,85,247,.08), transparent 60%),
+    hsl(var(--background));
+  background-attachment: fixed;
+}
+.glass-card, .three-d-card, .glass-premium, .glass-panel {
+  border-radius: 1rem !important;
+  border-color: rgba(129,140,248,.22) !important;
+  box-shadow: var(--shadow-soft) !important;
+  transition: transform .2s ease, box-shadow .2s ease;
+}
+.glass-card:hover, .three-d-card:hover { box-shadow: 0 2px 4px rgba(15,23,42,.05), 0 18px 40px -14px rgba(139,92,246,.38) !important; }
+.gradient-text {
+  background: var(--bb-gradient); -webkit-background-clip: text; background-clip: text; color: transparent !important;
+}
+h1 { letter-spacing: -.02em; }
+main h1 { background: var(--bb-gradient); -webkit-background-clip: text; background-clip: text; color: transparent !important; }
+button.bg-primary, a.bg-primary, .btn-3d {
+  background-image: var(--bb-gradient) !important; border: 0 !important;
+  box-shadow: 0 8px 22px -8px rgba(99,102,241,.6) !important;
+}
+button.bg-primary:hover, .btn-3d:hover { filter: brightness(1.06) saturate(1.1); transform: translateY(-1px); }
+input:focus-visible, textarea:focus-visible, select:focus-visible, [role="combobox"]:focus-visible {
+  box-shadow: 0 0 0 3px rgba(139,92,246,.22) !important; border-color: rgba(139,92,246,.6) !important;
+}
+aside, nav { scrollbar-width: thin; }
+aside a[aria-current="page"], aside a.active, aside [data-active="true"] {
+  background: linear-gradient(120deg, rgba(59,130,246,.14), rgba(168,85,247,.14)) !important;
+  border-color: rgba(139,92,246,.35) !important; color: #4338ca !important;
+}
+table thead tr { background: linear-gradient(120deg, rgba(59,130,246,.07), rgba(168,85,247,.07)); }
+table tbody tr:hover { background: rgba(139,92,246,.05); }
+[role="dialog"] { border-radius: 1.1rem !important; box-shadow: 0 30px 80px -20px rgba(79,70,229,.45) !important; }
+[role="dialog"]::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 4px; background: var(--bb-gradient); border-radius: 1.1rem 1.1rem 0 0; }
+[role="tablist"] { background: linear-gradient(120deg, rgba(59,130,246,.08), rgba(236,72,153,.08)) !important; }
+[role="tab"][data-state="active"] { color: #4f46e5 !important; box-shadow: 0 4px 14px -6px rgba(99,102,241,.5) !important; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: linear-gradient(#818cf8, #c084fc); border-radius: 8px; }
+/* Compact density: less gap/space on every page so everything fits at a glance */
+main { font-size: .925rem; }
+main .p-8, main .md\:p-8, main .lg\:p-8 { padding: 1rem !important; }
+main .p-6, main .sm\:p-6, main .md\:p-6 { padding: .75rem !important; }
+main .px-6, main .sm\:px-6 { padding-left: .75rem !important; padding-right: .75rem !important; }
+main .py-6, main .py-8 { padding-top: .75rem !important; padding-bottom: .75rem !important; }
+main .pt-6 { padding-top: .75rem !important; }
+main .space-y-8 > * + *, main .space-y-6 > * + * { margin-top: .75rem !important; }
+main .space-y-4 > * + * { margin-top: .5rem !important; }
+main .gap-8, main .gap-6 { gap: .75rem !important; }
+main .gap-4 { gap: .5rem !important; }
+main .mb-8, main .mb-6 { margin-bottom: .75rem !important; }
+main .mt-8, main .mt-6 { margin-top: .75rem !important; }
+main .text-4xl { font-size: 1.6rem !important; line-height: 2rem !important; }
+main .text-3xl { font-size: 1.4rem !important; line-height: 1.8rem !important; }
+main .text-2xl { font-size: 1.2rem !important; line-height: 1.6rem !important; }
+main .h-12.w-12, main .w-12.h-12 { width: 2.25rem !important; height: 2.25rem !important; }

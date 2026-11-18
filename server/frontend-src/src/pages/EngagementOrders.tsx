@@ -1,3 +1,4 @@
+import { istClock } from "@/lib/run-live-count";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
@@ -486,7 +487,7 @@ function OrderCard({ order, onClick, onRefill, selected, onToggleSelect, busy, o
           <div className="flex items-center gap-2 p-3 bg-secondary rounded-xl border border-border text-sm">
             <Timer className="h-4 w-4 text-foreground" />
             <span className="text-muted-foreground">Next run:</span>
-            <strong className="text-foreground">{format(new Date(nextRun.scheduled_at), 'HH:mm')}</strong>
+            <strong className="text-foreground">{istClock(nextRun.scheduled_at) + ' IST'}</strong>
             <span className="text-muted-foreground">
               ({formatDistanceToNow(new Date(nextRun.scheduled_at), { addSuffix: true })})
             </span>

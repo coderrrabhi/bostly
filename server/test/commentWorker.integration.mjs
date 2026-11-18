@@ -30,6 +30,8 @@ function setup(fetchHandler, overrides = {}) {
   globalThis.__query = async (sql, params) => {
     queries.push({ sql, params });
     if (sql.includes('WITH candidate AS')) return { rows: [run] };
+    if (sql.includes('AS views_delivered')) return { rows: [{ item_total: 100, views_total: 1000, views_delivered: 1000, sent_base: 0 }] };
+    if (sql.includes('SELECT min_quantity,max_quantity')) return { rows: [{ min_quantity: 1, max_quantity: 1000000 }] };
     if (sql.includes('SELECT id,name,api_url')) return { rows: ['a','b'].map(id => ({ id, name: id,
       api_url: 'https://provider.example/api', api_key_ciphertext: 'mock', priority: 1 })) };
     return { rows: [{ id: run.id, status: 'pending' }] };
@@ -208,4 +210,40 @@ test('provider Failed never requeues after views completion', async () => {
   assert.equal(result, true);
   assert.equal(queries.some(q => q.sql.includes("SET status='pending',provider_order_id=NULL")), false);
   assert.ok(queries.some(q => q.params?.[0] === 'Failover skipped: all views runs and the ordered views total are already complete.'));
+});
+
+for (const engagement_type of ['likes','comments','saves','shares','reposts']) {
+  test(`${engagement_type} cannot dispatch with zero confirmed Views`, async () => {
+    setup(() => { throw new Error('No paid request permitted'); }, { engagement_type });
+    const query = globalThis.__query;
+    globalThis.__query = async (sql, params) => sql.includes('AS views_delivered')
+      ? { rows: [{ item_total: 100, views_total: 1000, views_delivered: 0, sent_base: 0 }] } : query(sql, params);
+    await processNextRun();
+    assert.equal(requests.length, 0);
+    assert.ok(queries.some(q => q.params?.[0] === 'Waiting for confirmed Views delivery required by this engagement ratio.'));
+  });
+}
+
+test('min-10 priority 1 is skipped for quantity 5; min-5 priority 2 gets the exact order', async () => {
+  setup(() => new Response(JSON.stringify({ order: 456 })), { ...likesRun, quantity_to_send: 5,
+    provider_mappings: [{ user_provider_account_id: 'a', provider_service_id: '1', priority: 1 },
+      { user_provider_account_id: 'b', provider_service_id: '2', priority: 2 }] });
+  const query = globalThis.__query;
+  globalThis.__query = async (sql, params) => sql.includes('SELECT min_quantity,max_quantity')
+    ? { rows: [{ min_quantity: params[0] === 'a' ? 10 : 5, max_quantity: 10000 }] } : query(sql, params);
+  await processNextRun();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].get('service'), '2');
+  assert.equal(requests[0].get('quantity'), '5');
+});
+
+test('no quantity-compatible provider leaves run queued without altering its curve quantity', async () => {
+  setup(() => { throw new Error('No paid request permitted'); }, { ...likesRun, quantity_to_send: 5 });
+  const query = globalThis.__query;
+  globalThis.__query = async (sql, params) => sql.includes('SELECT min_quantity,max_quantity')
+    ? { rows: [{ min_quantity: 10, max_quantity: 10000 }] } : query(sql, params);
+  await processNextRun();
+  assert.equal(requests.length, 0);
+  assert.equal(run.quantity_to_send, 5);
+  assert.ok(queries.some(q => q.params?.[0]?.includes('verified limits')));
 });
