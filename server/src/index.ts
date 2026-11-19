@@ -12,10 +12,12 @@ if (Number.isNaN(port) || port <= 0) {
 
 // In production, also serve the built frontend so one process runs the whole site.
 const staticDir = path.resolve(
-  process.env["STATIC_DIR"] ?? path.join(process.cwd(), "../artifacts/boostly-pro/dist/public"),
+  process.env["STATIC_DIR"] ?? (existsSync(path.join(process.cwd(), "frontend/public/index.html"))
+    ? path.join(process.cwd(), "frontend/public")
+    : path.join(process.cwd(), "../artifacts/boostly-pro/dist/public")),
 );
 if (existsSync(path.join(staticDir, "index.html"))) {
-  app.use(sirv(staticDir, { single: true, brotli: true, gzip: true, etag: true }));
+  app.use(sirv(staticDir, { single: true, brotli: false, gzip: false, etag: true }));
   logger.info({ staticDir }, "Serving frontend build");
 }
 

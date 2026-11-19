@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { AppErrorBoundary } from "@/components/app/AppErrorBoundary";
 import { Loader2 } from "lucide-react";
 import { routeLoaders } from "@/lib/routePreload";
+import { ContactHelp } from "@/components/ContactHelp";
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -21,24 +22,25 @@ import Index from "./pages/Index";
 const SmmPanelUsa = lazy(() => import("./pages/SmmPanelUsa"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 const Auth = lazy(() => import("./pages/Auth"));
-const Dashboard = lazy(routeLoaders["/dashboard"] as () => Promise<{ default: React.ComponentType }>);
+const Dashboard = lazy(() => import("./pages/Dashboard"));
 const Orders = lazy(() => import("./pages/Orders"));
 const Wallet = lazy(() => import("./pages/Wallet"));
 const Settings = lazy(() => import("./pages/Settings"));
 const Support = lazy(() => import("./pages/Support"));
 const Maintenance = lazy(() => import("./pages/Maintenance"));
-const EngagementOrder = lazy(routeLoaders["/engagement-order"] as () => Promise<{ default: React.ComponentType }>);
-const EngagementOrders = lazy(routeLoaders["/engagement-orders"] as () => Promise<{ default: React.ComponentType }>);
+const EngagementOrder = lazy(() => import("./pages/EngagementOrder"));
+const EngagementOrders = lazy(() => import("./pages/EngagementOrders"));
 const EngagementOrderDetail = lazy(() => import("./pages/EngagementOrderDetail"));
 const ApiAccess = lazy(() => import("./pages/ApiAccess"));
-const MyProviders = lazy(routeLoaders["/my-providers"] as () => Promise<{ default: React.ComponentType }>);
+const MyProviders = lazy(() => import("./pages/MyProviders"));
 const MyServices = lazy(() => import("./pages/MyServices"));
-const MyBundles = lazy(routeLoaders["/my-bundles"] as () => Promise<{ default: React.ComponentType }>);
-const MassOrder = lazy(routeLoaders["/mass-order"] as () => Promise<{ default: React.ComponentType }>);
-const AIIntelligence = lazy(routeLoaders["/ai-intelligence"] as () => Promise<{ default: React.ComponentType }>);
-const Subscription = lazy(routeLoaders["/subscription"] as () => Promise<{ default: React.ComponentType }>);
-const Admin = lazy(routeLoaders["/admin"] as () => Promise<{ default: React.ComponentType }>);
+const MyBundles = lazy(() => import("./pages/MyBundles"));
+const MassOrder = lazy(() => import("./pages/MassOrder"));
+const AIIntelligence = lazy(() => import("./pages/AIIntelligence"));
+const Subscription = lazy(() => import("./pages/Subscription"));
+const Admin = lazy(() => import("./pages/admin/Admin"));
 const AdminUsers = lazy(() => import("./pages/admin/AdminUsers"));
+const AdminDevices = lazy(() => import("./pages/admin/AdminDevices"));
 const AdminBundles = lazy(() => import("./pages/admin/AdminBundles"));
 const AdminCronMonitor = lazy(() => import("./pages/admin/AdminCronMonitor"));
 const AdminDeposits = lazy(() => import("./pages/admin/AdminDeposits"));
@@ -132,6 +134,7 @@ const AppRoutes = () => {
       <Route path="/admin" element={<AdminGuard><Admin /></AdminGuard>} />
       <Route path="/admin/services" element={<AdminGuard><AdminServices /></AdminGuard>} />
       <Route path="/admin/users" element={<AdminGuard><AdminUsers /></AdminGuard>} />
+      <Route path="/admin/devices" element={<AdminGuard><AdminDevices /></AdminGuard>} />
       <Route path="/admin/bundles" element={<AdminGuard><AdminBundles /></AdminGuard>} />
       <Route path="/admin/cron-monitor" element={<AdminGuard><AdminCronMonitor /></AdminGuard>} />
       <Route path="/admin/chat" element={<AdminGuard><AdminChat /></AdminGuard>} />
@@ -183,6 +186,7 @@ const App = () => {
               <TooltipProvider>
                 <Toaster />
                 <Sonner />
+                <ContactHelp />
                 <AppErrorBoundary>
                   <ScrollToTop />
                   <Suspense fallback={<PageFallback />}>

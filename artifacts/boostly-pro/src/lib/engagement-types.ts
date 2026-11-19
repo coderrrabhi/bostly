@@ -153,18 +153,18 @@ export const ENGAGEMENT_CONFIG = {
 
 } as const;
 
-// Default engagement ratios (percentage of base views)
+// Default engagement ratios (percentage of base views - matches selective ratio midpoints)
 export const DEFAULT_RATIOS: Record<EngagementType, number> = {
   views: 100,
-  likes: 3.1,
-  comments: 0.2,
-  saves: 1.1,
-  shares: 1.3,
+  likes: 3.5,     // 2.1% - 5.0%
+  comments: 0.1,  // 0.03% - 0.2%
+  saves: 0.4,     // 0.2% - 0.6%
+  shares: 0.3,    // 0.1% - 0.5%
   followers: 2,
   subscribers: 3,
   watch_hours: 5,
-  retweets: 4,
-  reposts: 1.3,
+  retweets: 2,
+  reposts: 0.14,  // 0.03% - 0.25%
 };
 
 // Platform-specific engagement types

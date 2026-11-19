@@ -42,7 +42,8 @@ const requestSchema = z.object({
   })).max(25).default([]),
   order: z.object({ column: z.string(), ascending: z.boolean().default(true) }).optional(),
   limit: z.number().int().min(1).max(500).optional(),
-  range: z.object({ from: z.number().int().min(0), to: z.number().int().min(0).max(999) }).optional(),
+  range: z.object({ from: z.number().int().min(0), to: z.number().int().min(0) })
+    .refine((range) => range.to >= range.from && range.to - range.from < 500, 'Invalid page range').optional(),
   select: z.string().max(4000).optional(),
 });
 

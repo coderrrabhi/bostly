@@ -139,7 +139,7 @@ export function DeliveryPreview({ engagements, refreshKey = 0, platform = 'insta
     // Generate individual schedule for each type with SEQUENCED start times
     const independentSchedules: FullOrganicConfig[] = sortedTypes.map(({ type, config }) => {
       const rawTimeLimitHours = config.timeLimitHours ?? DEFAULT_ORGANIC_SETTINGS.timeLimitHours;
-      const variancePercent = config.variancePercent ?? DEFAULT_ORGANIC_SETTINGS.variancePercent;
+      const variancePercent = Math.max(50, config.variancePercent ?? DEFAULT_ORGANIC_SETTINGS.variancePercent);
       const peakHoursEnabled = config.peakHoursEnabled ?? DEFAULT_ORGANIC_SETTINGS.peakHoursEnabled;
       const serviceMinimum = config.minQuantity || PROVIDER_MINIMUMS[type] || 10;
       const isViewType = type === 'views';
@@ -232,7 +232,10 @@ export function DeliveryPreview({ engagements, refreshKey = 0, platform = 'insta
       
       return schedule;
     });
-    const schedules = coordinateEngagementSchedules(independentSchedules);
+    const schedules = coordinateEngagementSchedules(
+      independentSchedules,
+      Object.fromEntries(enabledTypes.map(({ type, config }) => [type, config.minQuantity && config.minQuantity > 0 ? config.minQuantity : 1])),
+    );
 
     // Merge all runs into a single timeline with unique IDs
     const allEvents: TimelineEvent[] = [];
@@ -276,7 +279,7 @@ export function DeliveryPreview({ engagements, refreshKey = 0, platform = 'insta
         duration: schedule.totalDuration,
         finishTime,
         timeLimitHours: config.timeLimitHours ?? 0,
-        variancePercent: config.variancePercent ?? 25,
+        variancePercent: Math.max(50, config.variancePercent ?? 50),
         peakHoursEnabled: config.peakHoursEnabled ?? false, // OFF by default
         totalQuantity: typeTotal,
       };

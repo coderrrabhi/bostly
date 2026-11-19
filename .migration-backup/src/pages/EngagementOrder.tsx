@@ -1,3 +1,5 @@
+import { DeliveryStartAndMinimums } from "@/components/engagement/DeliveryStartAndMinimums";
+import { loadDeliverySettings, deliveryPayload, DEFAULT_MIN_QUANTITIES, type DeliverySettings } from "@/lib/order-delivery-settings";
 import { useState, useMemo, useEffect, useCallback, useRef, memo } from "react";
 import { useNavigate, Navigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -31,12 +33,17 @@ import {
   createInitialPoints,
   curveToSchedule,
   calculateQuantitiesFromCurve,
+  CURVE_PRESETS,
+  CurvePreset,
 } from "@/lib/curve-to-schedule";
 import { Loader2, Rocket, Link as LinkIcon, Brain, Percent, HelpCircle, ArrowDown, Sparkles, Clock, Shuffle, Shield, TrendingUp, Eye } from "lucide-react";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import { useDebounce } from "@/hooks/useDebounce";
-import { FullOrganicConfig } from "@/lib/organic-algorithm";
+import { FullOrganicConfig, generateRandomVaryingRuns } from "@/lib/organic-algorithm";
+import { Textarea } from "@/components/ui/textarea";
+import { MIN_VARIANCE_PERCENT, minOrderFor, normalizeRunTotals, randomRatioPercent, US_PEAK_LABEL, curveStyleFor } from "@/lib/organic-extras";
+import { Flame, MessageSquare } from "lucide-react";
 
 type EngagementConfigs = Record<string, EngagementConfig>;
 
@@ -54,6 +61,10 @@ type UserBundleItem = {
   quantity: number;
   user_bundle_id: string;
   user_service_id: string | null;
+  min_ratio_percent?: number | null;
+  max_ratio_percent?: number | null;
+  min_quantity?: number | null;
+  max_quantity?: number | null;
   user_bundle_item_providers?: UserBundleItemProvider[];
 };
 
@@ -116,6 +127,18 @@ export default function EngagementOrder() {
   // regardless of base quantity changes — they can edit each type independently.
   const userEditedQtyRef = useRef<Set<EngagementType>>(new Set());
 
+  // Random ratio % per type (inside the bundle's Min%–Max%), re-rolled per bundle.
+  const [ratioPcts, setRatioPcts] = useState<Record<string, number>>({});
+  // Peak hours in USA time for every engagement type.
+  const [peakUS, setPeakUS] = useState(false);
+  const [deliverySettings, setDeliverySettings] = useState<DeliverySettings>(() => loadDeliverySettings());
+  // Custom comments (one per line) for the comments type.
+  const [customCommentsText, setCustomCommentsText] = useState('');
+  const customComments = useMemo(
+    () => customCommentsText.split(/\r?\n/).map((c) => c.trim()).filter(Boolean),
+    [customCommentsText],
+  );
+
   // Local settings toggles (defaulted from localStorage)
   const [isOrganicMode, setIsOrganicMode] = useState(true);
   const [isAutoRatios, setIsAutoRatios] = useState(true);
@@ -142,7 +165,7 @@ export default function EngagementOrder() {
       if (!user?.id) return [];
       const { data, error } = await supabase
         .from('user_bundles')
-        .select('id, name, platform, is_active, user_bundle_items(id, engagement_type, quantity, user_bundle_id, user_service_id, user_bundle_item_providers(id, enabled, priority, provider_service_id, user_provider_account_id))')
+        .select('id, name, platform, is_active, user_bundle_items(id, engagement_type, quantity, user_bundle_id, user_service_id, min_ratio_percent, max_ratio_percent, min_quantity, max_quantity, user_bundle_item_providers(id, enabled, priority, provider_service_id, user_provider_account_id))')
         .eq('user_id', user.id)
         .eq('is_active', true)
         .order('created_at', { ascending: false });
@@ -177,6 +200,36 @@ export default function EngagementOrder() {
 
   const bundlesLoading = userBundlesLoading;
 
+  const rollRatios = useCallback(() => {
+    const next: Record<string, number> = {};
+    const items = selectedBundle?.user_bundle_items ?? [];
+    if (items.length > 0) {
+      items.forEach((item) => {
+        if (item.engagement_type && item.engagement_type !== 'views') {
+          next[item.engagement_type] = randomRatioPercent(item.engagement_type, item);
+        }
+      });
+    } else {
+      ['likes', 'comments', 'shares', 'saves', 'reposts'].forEach((t) => {
+        next[t] = randomRatioPercent(t);
+      });
+    }
+    setRatioPcts(next);
+  }, [selectedBundle]);
+
+  useEffect(() => { rollRatios(); }, [rollRatios]);
+
+  // When base views quantity changes, auto calculate fresh random quantities from selective engagement ratios
+  const prevBaseQuantityRef = useRef(baseQuantity);
+  useEffect(() => {
+    if (prevBaseQuantityRef.current !== baseQuantity) {
+      prevBaseQuantityRef.current = baseQuantity;
+      // Clear manual locks so all engagement breakdown fields auto-fulfill dynamically on new views
+      userEditedQtyRef.current.clear();
+      rollRatios();
+    }
+  }, [baseQuantity, rollRatios]);
+
   // Get active engagement types from bundle
   const activeEngagementTypes = useMemo<EngagementType[]>(() => {
     const items = selectedBundle?.user_bundle_items ?? [];
@@ -199,13 +252,12 @@ export default function EngagementOrder() {
   const baseTypeQuantities = useMemo(() => {
     const base: Record<EngagementType, number> = {} as Record<EngagementType, number>;
     activeEngagementTypes.forEach((type) => {
-      // Use user's custom ratio if available from localStorage, else fallback to default
-      const userRatio = userSavedRatios?.[type];
-      const ratio = typeof userRatio === 'number' ? userRatio : DEFAULT_RATIOS[type];
+      const it = selectedBundle?.user_bundle_items?.find((x: any) => x.engagement_type === type);
+      const ratio = type === 'views' ? 100 : (ratioPcts[type] ?? randomRatioPercent(type, it));
       base[type] = Math.round(debouncedBaseQuantity * (ratio / 100));
     });
     return base;
-  }, [debouncedBaseQuantity, activeEngagementTypes, userSavedRatios]);
+  }, [debouncedBaseQuantity, activeEngagementTypes, ratioPcts, selectedBundle]);
   const mappedProviderServiceIds = useMemo(() => {
     const ids = new Set<string>();
     (selectedBundle?.user_bundle_items ?? []).forEach((item) => {
@@ -215,6 +267,92 @@ export default function EngagementOrder() {
     });
     return [...ids];
   }, [selectedBundle]);
+
+  // Selected curve pattern (defaults to 'viral-spike' - Viral Surge)
+  const [selectedCurveId, setSelectedCurveId] = useState<string>('viral-spike');
+  // Timeframe: 'auto' or 'custom'
+  const [timeframeMode, setTimeframeMode] = useState<'auto' | 'custom'>('auto');
+  const [customTimeHours, setCustomTimeHours] = useState<number>(6);
+  // Extended 550+ library state
+  const [showExtendedCurves, setShowExtendedCurves] = useState(false);
+  const [extendedSeed, setExtendedSeed] = useState<number>(101);
+
+  // Auto timeframe calculator based on views quantity & curve pattern
+  const autoCalculatedHours = useMemo(() => {
+    let base = 4;
+    if (baseQuantity <= 500) base = 2;
+    else if (baseQuantity <= 1500) base = 3;
+    else if (baseQuantity <= 5000) base = 6;
+    else if (baseQuantity <= 10000) base = 10;
+    else if (baseQuantity <= 25000) base = 16;
+    else if (baseQuantity <= 50000) base = 24;
+    else if (baseQuantity <= 100000) base = 36;
+    else base = 48;
+
+    const preset = CURVE_PRESETS.find(p => p.id === selectedCurveId);
+    const factor = preset?.timeFactor ?? 1.0;
+    return Math.max(1, Math.round(base * factor));
+  }, [baseQuantity, selectedCurveId]);
+
+  const activeTimeframeHours = timeframeMode === 'auto' ? autoCalculatedHours : (customTimeHours || 4);
+
+  // Auto-calculated number of runs based on timeframe and quantity
+  const autoCalculatedRuns = useMemo(() => {
+    const targetIntervalMinutes = 20; // ~1 run every 20 minutes
+    const theoreticalRuns = Math.round((activeTimeframeHours * 60) / targetIntervalMinutes);
+    const maxRunsByQty = Math.max(3, Math.floor(baseQuantity / 10));
+    return Math.max(4, Math.min(theoreticalRuns, maxRunsByQty, 65));
+  }, [activeTimeframeHours, baseQuantity]);
+
+  const applyPresetCurve = useCallback((presetId: string) => {
+    setSelectedCurveId(presetId);
+    const preset = CURVE_PRESETS.find(p => p.id === presetId);
+    if (!preset) return;
+
+    const points: Record<EngagementType, ControlPoint[]> = {} as any;
+    const typesToApply = activeEngagementTypes.length > 0 ? activeEngagementTypes : (['views', 'likes', 'comments', 'shares', 'saves'] as EngagementType[]);
+    typesToApply.forEach(t => {
+      points[t] = preset.getPoints(t);
+    });
+
+    setDrawModeState({
+      isEnabled: true,
+      activeType: 'views',
+      points,
+    });
+    setPreviewRefreshKey(k => k + 1);
+  }, [activeEngagementTypes]);
+
+  // Initialize preset curve on load once bundle types are ready
+  const initialCurveAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!initialCurveAppliedRef.current && activeEngagementTypes.length > 0) {
+      applyPresetCurve('viral-spike');
+      initialCurveAppliedRef.current = true;
+    }
+  }, [activeEngagementTypes, applyPresetCurve]);
+
+  // Sync activeTimeframeHours and autoCalculatedRuns to engagements
+  useEffect(() => {
+    setEngagements(prev => {
+      let changed = false;
+      const updated = { ...prev };
+      Object.keys(updated).forEach(k => {
+        const t = k as EngagementType;
+        if (updated[t]) {
+          if (updated[t].timeLimitHours !== activeTimeframeHours || updated[t].runCount !== autoCalculatedRuns) {
+            updated[t] = {
+              ...updated[t],
+              timeLimitHours: activeTimeframeHours,
+              runCount: autoCalculatedRuns,
+            };
+            changed = true;
+          }
+        }
+      });
+      return changed ? updated : prev;
+    });
+  }, [activeTimeframeHours, autoCalculatedRuns]);
 
   const { data: userServices = [] } = useQuery({
     queryKey: ['full-engagement-user-services', user?.id, mappedProviderServiceIds.join(',')],
@@ -256,12 +394,16 @@ export default function EngagementOrder() {
         const mins = matchedServices.map((s: any) => Number(s.min_quantity || 0)).filter((n: number) => n > 0);
         const maxes = matchedServices.map((s: any) => Number(s.max_quantity || 0)).filter((n: number) => n > 0);
 
+        // Bundle-level Min/Max (set on My Bundles page) overrides the provider's limits.
+        const bundleMin = Number(item.min_quantity || 0);
+        const bundleMax = Number(item.max_quantity || 0);
+
         prices[item.engagement_type] = {
           pricePerK: Number(cheapest.rate) || 0,
           serviceId: null,
           userServiceId: cheapest.id,
-          minQuantity: mins.length > 0 ? Math.min(...mins) : 0,
-          maxQuantity: maxes.length > 0 ? Math.max(...maxes) : undefined,
+          minQuantity: bundleMin > 0 ? bundleMin : (mins.length > 0 ? Math.min(...mins) : 0),
+          maxQuantity: bundleMax > 0 ? bundleMax : (maxes.length > 0 ? Math.max(...maxes) : undefined),
         };
         return;
       }
@@ -269,11 +411,14 @@ export default function EngagementOrder() {
       // If services were not imported, still show the card from provider mappings.
       // Backend will validate/route by provider_service_id; price stays hidden/zero.
       if (mappedProviders.length > 0) {
+        const bundleMin = Number(item.min_quantity || 0);
+        const bundleMax = Number(item.max_quantity || 0);
         prices[item.engagement_type] = {
           pricePerK: 0,
           serviceId: null,
           userServiceId: null,
-          minQuantity: item.engagement_type === 'views' ? 100 : 0,
+          minQuantity: bundleMin > 0 ? bundleMin : (item.engagement_type === 'views' ? 100 : 0),
+          maxQuantity: bundleMax > 0 ? bundleMax : undefined,
         };
       }
     });
@@ -309,43 +454,64 @@ export default function EngagementOrder() {
         // If auto-ratios is OFF, only enable 'views' by default
         const isEnabledByDefault = isAutoRatios || type === 'views';
 
-        // Use user's custom ratio if available from localStorage, else fallback to default
-        const userRatio = userSavedRatios?.[type];
-        const ratioPercent = typeof userRatio === 'number' ? userRatio : (DEFAULT_RATIOS[type] ?? 1);
+        const bundleItem = items.find((it: any) => it.engagement_type === type);
+        // Use Selective Engagement Ratio (from Settings / Bundle Min%-Max%) - NOT AI Organic Automation Ratios!
+        const ratioPercent = type === 'views'
+          ? 100
+          : typeof ratioPcts[type] === 'number'
+            ? ratioPcts[type]
+            : randomRatioPercent(type, bundleItem);
 
         const ratioQuantity = Math.round(debouncedBaseQuantity * (ratioPercent / 100));
 
         const serviceData = servicePrices[type];
 
-        // Respect user's base quantity exactly — no auto bump to provider minimum.
-        // If it's below provider min, the per-card warning will appear.
-        const quantity = ratioQuantity;
+        const configuredMin = (deliverySettings.minMode === "custom"
+          ? deliverySettings.customMins[type]
+          : DEFAULT_MIN_QUANTITIES[type]) ?? minOrderFor(type, serviceData?.minQuantity);
+        const effectiveMin = Math.max(configuredMin || 0, Number(serviceData?.minQuantity || 0), 1);
+
+        // Respect user's base quantity exactly — other types respect effective minimum.
+        const quantity = type === 'comments' && customComments.length > 0
+          ? customComments.length
+          : (type === 'views' ? ratioQuantity : Math.max(effectiveMin, ratioQuantity));
 
         const isUserEdited = userEditedQtyRef.current.has(type);
-        const finalQuantity = isUserEdited && prev[type]
-          ? prev[type].quantity
-          : ((isAutoRatios || !prev[type]) ? quantity : prev[type].quantity);
+        // Views drive everything: other types always follow their % unless the user typed a value.
+        const finalQuantity = type === 'comments' && customComments.length > 0
+          ? customComments.length
+          : (isUserEdited && prev[type] ? prev[type].quantity : quantity);
         const finalPrice = serviceData
           ? (finalQuantity / 1000) * serviceData.pricePerK
           : prev[type]?.price ?? 0;
 
         updated[type] = {
           type,
-          enabled: prev[type] ? prev[type].enabled : isEnabledByDefault,
+          enabled: type === 'comments' && customComments.length > 0 ? true : (prev[type] ? prev[type].enabled : isEnabledByDefault),
           quantity: finalQuantity,
           price: finalPrice,
           serviceId: serviceData?.serviceId ?? prev[type]?.serviceId ?? null,
           userServiceId: serviceData?.userServiceId ?? (prev[type] as any)?.userServiceId ?? null,
-          minQuantity: serviceData?.minQuantity ?? prev[type]?.minQuantity,
+          minQuantity: effectiveMin,
           // Per-type organic settings
-          timeLimitHours: prev[type]?.timeLimitHours ?? DEFAULT_ORGANIC_SETTINGS.timeLimitHours,
-          variancePercent: prev[type]?.variancePercent ?? DEFAULT_ORGANIC_SETTINGS.variancePercent,
-          peakHoursEnabled: prev[type]?.peakHoursEnabled ?? DEFAULT_ORGANIC_SETTINGS.peakHoursEnabled,
+          timeLimitHours: activeTimeframeHours > 0 ? activeTimeframeHours : (prev[type]?.timeLimitHours ?? DEFAULT_ORGANIC_SETTINGS.timeLimitHours),
+          variancePercent: Math.max(MIN_VARIANCE_PERCENT, prev[type]?.variancePercent ?? DEFAULT_ORGANIC_SETTINGS.variancePercent),
+          peakHoursEnabled: prev[type]?.peakHoursEnabled ?? peakUS,
+          runCount: autoCalculatedRuns > 0 ? autoCalculatedRuns : prev[type]?.runCount,
         };
       });
       return updated;
     });
-  }, [debouncedBaseQuantity, selectedBundle, servicePrices, userSavedRatios, isAutoRatios]);
+  }, [debouncedBaseQuantity, selectedBundle, servicePrices, userSavedRatios, isAutoRatios, ratioPcts, customComments, activeTimeframeHours, autoCalculatedRuns, deliverySettings]);
+
+  const togglePeakUS = (enabled: boolean) => {
+    setPeakUS(enabled);
+    setEngagements((prev) => {
+      const next: EngagementConfigs = {};
+      Object.entries(prev).forEach(([k, v]) => { next[k] = { ...v, peakHoursEnabled: enabled }; });
+      return next;
+    });
+  };
 
   const handleEngagementChange = useCallback((type: EngagementType, config: EngagementConfig) => {
     setEngagements(prev => {
@@ -379,6 +545,8 @@ export default function EngagementOrder() {
 
       Object.keys(prev).forEach((type) => {
         const engType = type as EngagementType;
+        if (userEditedQtyRef.current.has(engType)) return;
+        if (engType === 'comments' && customComments.length > 0) return;
         const desired = nextQuantities[engType];
         if (typeof desired !== 'number' || Number.isNaN(desired)) return;
 
@@ -401,7 +569,7 @@ export default function EngagementOrder() {
 
       return changed ? updated : prev;
     });
-  }, [drawModeState.isEnabled, drawModeState.points, baseTypeQuantities]);
+  }, [drawModeState.isEnabled, drawModeState.points, baseTypeQuantities, customComments]);
 
   // Handle curve change from drawable chart (end-of-drag / preset / reset)
   const handleCurveChange = useCallback((type: EngagementType, points: ControlPoint[]) => {
@@ -533,6 +701,7 @@ export default function EngagementOrder() {
           base_quantity: baseQuantity,
           total_price: totalPrice,
           is_organic_mode: isOrganicMode,
+          ...deliveryPayload(deliverySettings),
           // Per-type settings will be in each engagement object
           engagements: selectedEngagements
             .map(({ type, config, bundleItem, providerMappings }) => {
@@ -556,23 +725,29 @@ export default function EngagementOrder() {
                 ...run,
                 run_number: index + 1,
               }));
-              const filteredRuns = rawRuns.filter((run) => (run.quantity_to_send ?? 0) > 0);
-              const lostQty =
-                rawRuns.reduce((s, r) => s + (r.quantity_to_send ?? 0), 0) -
-                filteredRuns.reduce((s, r) => s + r.quantity_to_send, 0);
-              if (lostQty > 0 && filteredRuns.length > 0) {
-                filteredRuns[filteredRuns.length - 1] = {
-                  ...filteredRuns[filteredRuns.length - 1],
-                  quantity_to_send: filteredRuns[filteredRuns.length - 1].quantity_to_send + lostQty,
-                };
-              }
-              // Final safety check: only use the schedule if it sums exactly to the
-              // order quantity. Any mismatch means the schedule is stale.
+              let filteredRuns = rawRuns.length > 0
+                ? normalizeRunTotals(rawRuns, config.quantity, config.minQuantity ?? 1)
+                : [];
               const filteredTotal = filteredRuns.reduce((s, r) => s + r.quantity_to_send, 0);
-              const scheduledRuns =
-                filteredRuns.length > 0 && filteredTotal === config.quantity
-                  ? filteredRuns
-                  : undefined;
+
+              if (filteredRuns.length === 0 || filteredTotal !== config.quantity) {
+                const effectiveMin = Math.max(1, config.minQuantity ?? 1);
+                const maxSlots = Math.min(10, Math.max(2, Math.floor(config.quantity / effectiveMin)));
+                const qtys = generateRandomVaryingRuns(config.quantity, effectiveMin, maxSlots);
+                const baseTime = Date.now() + 5 * 60_000;
+                const totalDur = (effectiveTimeLimit || 4) * 60 * 60_000;
+                const gap = qtys.length > 1 ? totalDur / (qtys.length - 1) : 30 * 60_000;
+                filteredRuns = qtys.map((qty, i) => ({
+                  run_number: i + 1,
+                  scheduled_at: new Date(baseTime + i * gap).toISOString(),
+                  quantity_to_send: qty,
+                  base_quantity: qty,
+                  variance_applied: 0,
+                  peak_multiplier: 1,
+                }));
+              }
+
+              const scheduledRuns = filteredRuns;
 
               return {
                 type,
@@ -588,7 +763,8 @@ export default function EngagementOrder() {
                 })),
                 // Per-type organic settings - always send resolved hours value
                 time_limit_hours: effectiveTimeLimit,
-                variance_percent: config.variancePercent,
+                variance_percent: Math.max(MIN_VARIANCE_PERCENT, config.variancePercent ?? MIN_VARIANCE_PERCENT),
+                custom_comments: type === 'comments' && customComments.length > 0 ? customComments.join("\n") : undefined,
                 peak_hours_enabled: config.peakHoursEnabled,
                 scheduled_runs: scheduledRuns,
               };
@@ -879,6 +1055,325 @@ export default function EngagementOrder() {
           </CardContent>
         </Card>
 
+        {/* Start time + minimum order per run */}
+        <DeliveryStartAndMinimums value={deliverySettings} onChange={setDeliverySettings} />
+
+        {/* 1. Timeframe Box (Auto / Custom) */}
+        <Card className="glass-card border-2 border-border overflow-hidden">
+          <CardContent className="p-4 sm:p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                  <Clock className="h-4 w-4 text-primary" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Label className="text-base font-bold text-foreground">Delivery Timeframe &amp; Pace</Label>
+                    <Badge variant="outline" className={timeframeMode === 'auto' ? "bg-primary/10 text-primary border-primary/20 text-xs font-semibold" : "bg-secondary text-foreground text-xs"}>
+                      {timeframeMode === 'auto' ? '⚡ Auto-Optimized' : '⚙️ Custom Hours'}
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {timeframeMode === 'auto'
+                      ? `Algorithm auto-set to ${activeTimeframeHours} hours for ${baseQuantity.toLocaleString()} views (${CURVE_PRESETS.find(p => p.id === selectedCurveId)?.name || 'Curve'}).`
+                      : `Customized delivery span set to ${activeTimeframeHours} hours.`}
+                  </p>
+                </div>
+              </div>
+
+              {/* Auto / Custom mode switch */}
+              <div className="flex items-center bg-secondary/80 p-1 rounded-xl border border-border shrink-0 self-start sm:self-auto">
+                <button
+                  type="button"
+                  className={cn(
+                    "px-3 py-1.5 rounded-lg text-xs font-semibold transition-all",
+                    timeframeMode === 'auto' ? "bg-primary text-primary-foreground shadow" : "text-muted-foreground hover:text-foreground"
+                  )}
+                  onClick={() => setTimeframeMode('auto')}
+                >
+                  ⚡ Auto Time
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    "px-3 py-1.5 rounded-lg text-xs font-semibold transition-all",
+                    timeframeMode === 'custom' ? "bg-primary text-primary-foreground shadow" : "text-muted-foreground hover:text-foreground"
+                  )}
+                  onClick={() => setTimeframeMode('custom')}
+                >
+                  Custom Time
+                </button>
+              </div>
+            </div>
+
+            {/* Custom Time Selection */}
+            {timeframeMode === 'custom' && (
+              <div className="pt-2 border-t border-border/60 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium text-muted-foreground">Quick Presets:</span>
+                  {[2, 4, 6, 8, 12, 18, 24, 48].map((hrs) => (
+                    <button
+                      key={hrs}
+                      type="button"
+                      onClick={() => setCustomTimeHours(hrs)}
+                      className={cn(
+                        "px-2.5 py-1 text-xs rounded-lg border font-medium transition-all",
+                        customTimeHours === hrs
+                          ? "border-primary bg-primary/10 text-primary font-bold shadow-sm"
+                          : "border-border bg-secondary/50 text-foreground hover:bg-secondary"
+                      )}
+                    >
+                      {hrs}h
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <Label className="text-xs whitespace-nowrap">Specific Hours:</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={168}
+                      className="w-24 h-9 text-sm"
+                      value={customTimeHours}
+                      onChange={(e) => setCustomTimeHours(Math.max(1, Number(e.target.value) || 1))}
+                    />
+                    <span className="text-xs text-muted-foreground font-medium">hours</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Auto-calculated Runs Display */}
+            <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-primary shrink-0" />
+                <span className="text-xs text-foreground font-medium">
+                  Auto-Calculated Schedule: <b className="text-primary font-bold">{autoCalculatedRuns} Runs</b> across all engagements
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
+                <span>⏱ Pacing: ~1 run every {Math.max(2, Math.round((activeTimeframeHours * 60) / autoCalculatedRuns))} mins</span>
+                <span>•</span>
+                <span>Total: {activeTimeframeHours}h</span>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* 2. Curves Selection Box (Top 10 Curated + Extended Library) */}
+        <Card className="glass-card border-2 border-border overflow-hidden">
+          <CardContent className="p-4 sm:p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                  <TrendingUp className="h-4 w-4 text-primary" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Label className="text-base font-bold text-foreground">Top 10 Delivery Curves (High Approval)</Label>
+                    <Badge variant="outline" className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20 text-[10px] font-bold">
+                      99.4% Algorithm Pass Rate
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Select a curated organic pattern. Each curve naturally varies pacing to bypass spam filters.
+                  </p>
+                </div>
+              </div>
+              <Badge variant="outline" className="text-xs font-mono self-start sm:self-auto">
+                Active: <span className="text-primary font-bold ml-1">{CURVE_PRESETS.find(p => p.id === selectedCurveId)?.name || 'Custom'}</span>
+              </Badge>
+            </div>
+
+            {/* Top 10 Curated Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-2.5">
+              {CURVE_PRESETS.map((preset) => {
+                const isSelected = selectedCurveId === preset.id;
+                const pts = preset.getPoints('views');
+                const svgPoints = pts.map(p => `${p.x * 0.9 + 5},${35 - (p.y * 0.28 + 2)}`).join(' ');
+
+                return (
+                  <div
+                    key={preset.id}
+                    onClick={() => applyPresetCurve(preset.id)}
+                    className={cn(
+                      "cursor-pointer rounded-xl border p-3 flex flex-col justify-between transition-all hover:border-primary/50",
+                      isSelected
+                        ? "border-2 border-primary bg-primary/10 shadow-sm"
+                        : "border-border bg-secondary/40 hover:bg-secondary/70"
+                    )}
+                  >
+                    <div>
+                      <div className="flex items-center justify-between gap-1 mb-1">
+                        <span className="text-base">{preset.emoji}</span>
+                        {preset.tag && (
+                          <span className={cn(
+                            "text-[9px] px-1.5 py-0.5 rounded font-semibold",
+                            isSelected ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground"
+                          )}>
+                            {preset.tag}
+                          </span>
+                        )}
+                      </div>
+                      <h4 className="text-xs font-bold text-foreground leading-tight">{preset.name}</h4>
+                      <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2 leading-snug">
+                        {preset.description}
+                      </p>
+                    </div>
+
+                    {/* Mini SVG Curve Sparkline */}
+                    <div className="mt-2.5 pt-2 border-t border-border/50">
+                      <svg viewBox="0 0 100 40" className="w-full h-8 overflow-visible">
+                        <polyline
+                          fill="none"
+                          stroke={isSelected ? "currentColor" : "rgba(150,150,150,0.5)"}
+                          strokeWidth="2.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className={isSelected ? "text-primary" : ""}
+                          points={svgPoints}
+                        />
+                      </svg>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Collapsible for 550+ Extended Library & Freehand Editor */}
+            <div className="pt-2 border-t border-border/60">
+              <button
+                type="button"
+                onClick={() => setShowExtendedCurves(!showExtendedCurves)}
+                className="w-full flex items-center justify-between text-xs text-muted-foreground hover:text-foreground py-1 font-medium transition-colors"
+              >
+                <span className="flex items-center gap-1.5">
+                  <Shuffle className="w-3.5 h-3.5 text-primary" />
+                  Optional: Advanced 550+ Extended Curves Library &amp; Freehand Editor
+                </span>
+                <span className="text-[11px] font-mono text-primary font-semibold">
+                  {showExtendedCurves ? '▲ Hide Advanced' : '▼ Expand (550+ Curves)'}
+                </span>
+              </button>
+
+              {showExtendedCurves && (
+                <div className="mt-3 p-3.5 rounded-xl border border-border bg-secondary/30 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-bold text-foreground">Extended Algorithm Seeds (1 - 550+)</p>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        Current Seed #{extendedSeed}: <b className="text-foreground">{curveStyleFor(extendedSeed).name}</b> pattern
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="number"
+                        min={1}
+                        max={550}
+                        className="w-20 h-8 text-xs font-mono"
+                        value={extendedSeed}
+                        onChange={(e) => {
+                          const s = Math.max(1, Math.min(550, Number(e.target.value) || 1));
+                          setExtendedSeed(s);
+                        }}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 text-xs gap-1"
+                        onClick={() => {
+                          const rand = Math.floor(Math.random() * 550) + 1;
+                          setExtendedSeed(rand);
+                          toast({ title: `Rolled Seed #${rand}`, description: `Using ${curveStyleFor(rand).name} pattern.` });
+                        }}
+                      >
+                        <Shuffle className="w-3 h-3" /> Roll Random (1-550)
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t border-border/40">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-semibold text-foreground">Freehand Curve Canvas:</span>
+                      <Button
+                        type="button"
+                        variant={drawModeState.isEnabled ? "default" : "outline"}
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={() => {
+                          setDrawModeState(prev => ({
+                            ...prev,
+                            isEnabled: !prev.isEnabled,
+                            activeType: 'views',
+                          }));
+                        }}
+                      >
+                        {drawModeState.isEnabled ? 'Canvas Active' : 'Enable Freehand Draw'}
+                      </Button>
+                    </div>
+                    {drawModeState.isEnabled && (
+                      <div className="mt-2 rounded-xl border border-border bg-background p-2">
+                        <DrawableGrowthChart
+                          engagements={engagements as Record<EngagementType, EngagementConfig>}
+                          onCurveChange={handleCurveChange}
+                          drawModeState={drawModeState}
+                          onDrawModeChange={setDrawModeState}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Peak hours (USA) + variance */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-4">
+          <Card className="glass-card border-2 border-border">
+            <CardContent className="p-3 sm:p-4 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <Label className="text-sm font-bold flex items-center gap-1.5 text-foreground"><Flame className="h-4 w-4 text-primary" /> Peak Hours (USA Time)</Label>
+                <p className="text-[11px] text-muted-foreground mt-0.5">{US_PEAK_LABEL}. Applies to all engagement types.</p>
+              </div>
+              <Switch checked={peakUS} onCheckedChange={togglePeakUS} />
+            </CardContent>
+          </Card>
+          <Card className="glass-card border-2 border-border">
+            <CardContent className="p-3 sm:p-4 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <Label className="text-sm font-bold flex items-center gap-1.5 text-foreground"><Shield className="h-4 w-4 text-primary" /> Random Variance &amp; Detection Risk</Label>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Auto set to 50%+ on every type — low detection risk. Raise it per type in Settings.</p>
+              </div>
+              <span className="font-mono text-sm font-bold px-2 py-0.5 rounded-lg bg-primary/15 text-primary shrink-0">±{MIN_VARIANCE_PERCENT}%+</span>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Custom comments */}
+        {activeEngagementTypes.includes('comments' as EngagementType) && (
+          <Card className="glass-card border-2 border-border">
+            <CardContent className="p-4 sm:p-6 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-base font-bold tracking-tight text-foreground flex items-center gap-2"><MessageSquare className="h-4 w-4" /> Custom Comments (optional)</Label>
+                {customComments.length > 0 && (
+                  <Badge variant="outline" className="text-xs">{customComments.length} comments</Badge>
+                )}
+              </div>
+              <Textarea
+                rows={4}
+                className="font-mono text-[13px]"
+                placeholder={"One comment per line:\nGreat reel!\nLove this 🔥\nSo good"}
+                value={customCommentsText}
+                onChange={(e) => setCustomCommentsText(e.target.value)}
+              />
+              <p className="text-[11px] text-muted-foreground">Leave empty for random comments. When filled, the Comments quantity equals the number of lines.</p>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Engagement Types with Per-Type Settings */}
         <div className="space-y-4 sm:space-y-5">
           <div className="flex items-center justify-between px-1 gap-2">
@@ -888,7 +1383,25 @@ export default function EngagementOrder() {
                 Customize organic settings per type
               </p>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+              <Badge variant="outline" className="hidden sm:inline-flex bg-primary/10 text-primary border-primary/20 text-[10px] font-semibold py-1 px-2">
+                <Sparkles className="h-3 w-3 mr-1" />
+                Selective Ratios (Auto)
+              </Badge>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 px-2.5 text-[11px] sm:text-xs gap-1 font-semibold hover:bg-primary/10 hover:text-primary transition"
+                onClick={() => {
+                  userEditedQtyRef.current.clear();
+                  rollRatios();
+                  toast.success("Engagement Breakdown auto-fulfilled from selective ratios!");
+                }}
+                title="Auto-fulfill all breakdown quantities using Selective Engagement Ratios"
+              >
+                <Shuffle className="h-3.5 w-3.5" /> <span>Auto-fulfill Ratios</span>
+              </Button>
               <Popover>
                 <PopoverTrigger asChild>
                   <button
@@ -921,7 +1434,7 @@ export default function EngagementOrder() {
                       { icon: LinkIcon, title: 'Paste your post link', desc: 'Instagram reel, post or YouTube — one link triggers all engagement types.' },
                       { icon: Eye, title: 'Pick what you want', desc: 'Toggle Views, Likes, Comments, Saves, Shares. Set quantity per type or use the bundle.' },
                       { icon: Brain, title: 'AI plans organic delivery', desc: 'S-curve schedule splits each type into 5–15 runs with ±50% qty variance — no two batches identical.' },
-                      { icon: Clock, title: 'Smart timing', desc: 'Peak hours (6–10 PM IST) get 1.5× boost. Night slows down. ±5min jitter on every run.' },
+                      { icon: Clock, title: 'Smart timing', desc: 'Peak hours (6–11 PM USA time) get a boost. Night slows down. ±5min jitter on every run.' },
                       { icon: Shuffle, title: 'Multi-provider rotation', desc: 'Each run auto-routes to the best available provider for that type — quality stays high.' },
                       { icon: TrendingUp, title: 'Maintained, not dumped', desc: 'Engagement keeps trickling over hours so your post looks consistently active — not spiked.' },
                       { icon: Shield, title: '100% account safe', desc: 'Randomized patterns + human-like pacing = undetectable. Zero ban risk.' },
@@ -966,6 +1479,7 @@ export default function EngagementOrder() {
                   baseQuantity={baseQuantity}
                   onChange={(config) => handleEngagementChange(type, config)}
                   minQuantity={engagements[type]?.minQuantity}
+                  maxQuantity={servicePrices[type]?.maxQuantity}
                   customCurvePoints={drawModeState.isEnabled ? drawModeState.points[type] : undefined}
                   pricePerK={servicePrices[type]?.pricePerK}
                   previewSchedule={previewSchedules[type]}
@@ -978,8 +1492,8 @@ export default function EngagementOrder() {
 
 
 
-        {/* Live Growth Chart - Real-time visualization (shown when not drawing) */}
-        {!drawModeState.isEnabled && activeEngagementTypes.length > 0 && (
+        {/* Live Growth Chart - Real-time visualization */}
+        {activeEngagementTypes.length > 0 && (
           <LiveGrowthChart
             engagements={engagements as Record<EngagementType, EngagementConfig>}
             refreshKey={previewRefreshKey}

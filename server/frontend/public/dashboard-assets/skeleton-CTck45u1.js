@@ -1,0 +1,1 @@
+import{t as e}from"./utils-DC41TIjD.js";import{o as t}from"./vendor-query-DV17isol.js";var n=t();function r({className:t,...r}){return(0,n.jsx)(`div`,{className:e(`animate-pulse rounded-md bg-muted`,t),...r})}export{r as t};

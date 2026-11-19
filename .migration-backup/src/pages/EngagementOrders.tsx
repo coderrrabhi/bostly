@@ -32,6 +32,22 @@ import {
 } from "lucide-react";
 import { PageMeta } from "@/components/seo/PageMeta";
 import { Skeleton } from "@/components/ui/skeleton";
+import { RefillOrderDialog } from "@/components/engagement/RefillOrderDialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import { toast } from "sonner";
+import { Pause, Trash2 } from "lucide-react";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+
+const REFILL_WINDOW_HOURS = 48;
+
+async function runOrderAction(orderIds: string[], action: "pause" | "resume" | "delete") {
+  const { data, error } = await supabase.functions.invoke("engagement-order-action", { body: { order_ids: orderIds, action } });
+  if (error || (data as any)?.error) throw new Error((data as any)?.error || error?.message || "Action failed");
+  return data as any;
+}
 
 const ENGAGEMENT_ICONS = {
   views: Eye,
@@ -48,6 +64,8 @@ const STATUS_CONFIG = {
   partial: { color: "bg-secondary text-foreground border border-border", icon: RefreshCw },
   failed: { color: "bg-secondary text-foreground border border-border", icon: XCircle },
   started: { color: "bg-foreground text-background", icon: Play },
+  paused: { color: "bg-secondary text-foreground border border-border", icon: Pause },
+  cancelled: { color: "bg-secondary text-foreground border border-border", icon: XCircle },
 };
 
 export default function EngagementOrders() {
@@ -55,6 +73,31 @@ export default function EngagementOrders() {
   const { user, isLoading: authLoading } = useAuth();
   const { formatPrice } = useCurrency();
   const [searchQuery, setSearchQuery] = useState("");
+  const [refillOrderId, setRefillOrderId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
+
+  const doAction = async (ids: string[], action: "pause" | "resume" | "delete") => {
+    if (!ids.length) return;
+    setBusy(true);
+    try {
+      const res = await runOrderAction(ids, action);
+      const word = action === "pause" ? "paused" : action === "resume" ? "resumed" : "deleted";
+      toast.success(`${res?.updated ?? ids.length} order(s) ${word}`);
+      setSelected(new Set());
+      await refetch();
+    } catch (e: any) {
+      toast.error(e?.message || "Action failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const toggleSelect = (id: string) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
 
   // Instant load with cache + moderate refresh
   const { data: orders, isLoading: ordersLoading, isFetching, refetch } = useQuery({
@@ -64,17 +107,47 @@ export default function EngagementOrders() {
       const { data, error } = await supabase
         .from('engagement_orders')
         .select(`
-          id, order_number, status, total_price, link, base_quantity, created_at, updated_at, is_organic_mode,
+          id, order_number, status, total_price, link, base_quantity, created_at, updated_at, completed_at, is_organic_mode,
           items:engagement_order_items(
             id, engagement_type, quantity, delivered_count, status,
             runs:organic_run_schedule(status, quantity_to_send, scheduled_at, provider_status, provider_remains, error_message)
           )
         `)
         .eq('user_id', user.id)
+        .neq('status', 'deleted')
         .order('created_at', { ascending: false })
         .limit(30);
       if (error) throw error;
-      return data;
+      const list = (data ?? []) as any[];
+      // Keep every reel that finished in the last 48 hours visible (for refills), even beyond the newest 30.
+      const { data: light } = await supabase
+        .from('engagement_orders')
+        .select('id, status, created_at, updated_at, completed_at')
+        .eq('user_id', user.id)
+        .neq('status', 'deleted')
+        .order('created_at', { ascending: false })
+        .limit(500);
+      const have = new Set(list.map((o) => o.id));
+      const cutoff = Date.now() - REFILL_WINDOW_HOURS * 3600_000;
+      const extraIds = ((light ?? []) as any[])
+        .filter((o) => !have.has(o.id))
+        .filter((o) => ['pending', 'processing', 'paused'].includes(o.status) ||
+          new Date(o.completed_at || o.updated_at || o.created_at).getTime() >= cutoff)
+        .map((o) => o.id);
+      if (extraIds.length) {
+        const { data: extra } = await supabase
+          .from('engagement_orders')
+          .select(`
+            id, order_number, status, total_price, link, base_quantity, created_at, updated_at, completed_at, is_organic_mode,
+            items:engagement_order_items(
+              id, engagement_type, quantity, delivered_count, status,
+              runs:organic_run_schedule(status, quantity_to_send, scheduled_at, provider_status, provider_remains, error_message)
+            )
+          `)
+          .in('id', extraIds);
+        list.push(...((extra ?? []) as any[]));
+      }
+      return list.filter((o) => o.status !== 'deleted');
     },
     enabled: !!user,
     staleTime: 30000,
@@ -193,17 +266,76 @@ export default function EngagementOrders() {
           </Card>
         ) : (
           <div className="space-y-4">
+            <div className="glass-card p-3 flex flex-wrap items-center gap-2 sticky top-2 z-10">
+              <Checkbox
+                checked={!!filteredOrders?.length && selected.size === filteredOrders.length}
+                onCheckedChange={(c) => setSelected(c ? new Set((filteredOrders ?? []).map((o: any) => o.id)) : new Set())}
+              />
+              <span className="text-sm text-muted-foreground mr-auto">
+                {selected.size ? `${selected.size} selected` : "Select orders for bulk Pause / Resume / Delete"}
+              </span>
+              <Button size="sm" variant="outline" disabled={!selected.size || busy} onClick={() => doAction([...selected], "pause")}>
+                <Pause className="h-4 w-4 mr-1" /> Pause
+              </Button>
+              <Button size="sm" variant="outline" disabled={!selected.size || busy} onClick={() => doAction([...selected], "resume")}>
+                <Play className="h-4 w-4 mr-1" /> Resume
+              </Button>
+              <Button size="sm" variant="destructive" disabled={!selected.size || busy} onClick={() => setConfirmDelete([...selected])}>
+                <Trash2 className="h-4 w-4 mr-1" /> Delete
+              </Button>
+            </div>
             {filteredOrders?.map((order) => (
-              <OrderCard key={order.id} order={order} onClick={() => navigate(`/engagement-orders/${order.order_number}`)} />
+              <OrderCard
+                key={order.id}
+                order={order}
+                onClick={() => navigate(`/engagement-orders/${order.order_number}`)}
+                onRefill={() => setRefillOrderId(order.id)}
+                selected={selected.has(order.id)}
+                onToggleSelect={() => toggleSelect(order.id)}
+                busy={busy}
+                onPause={() => doAction([order.id], "pause")}
+                onResume={() => doAction([order.id], "resume")}
+                onDelete={() => setConfirmDelete([order.id])}
+              />
             ))}
           </div>
         )}
       </div>
+      <AlertDialog open={!!confirmDelete} onOpenChange={(o) => { if (!o) setConfirmDelete(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {confirmDelete?.length ?? 0} order(s)?</AlertDialogTitle>
+            <AlertDialogDescription>
+              All runs not yet sent to providers will be stopped and the order(s) will be removed from this list. Runs already sent to a provider cannot be pulled back.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => { const ids = confirmDelete ?? []; setConfirmDelete(null); void doAction(ids, "delete"); }}
+            >
+              Yes, delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <RefillOrderDialog
+        orderId={refillOrderId}
+        open={!!refillOrderId}
+        onOpenChange={(o) => { if (!o) setRefillOrderId(null); }}
+        onDone={() => refetch()}
+      />
     </DashboardLayout>
   );
 }
 
-function OrderCard({ order, onClick }: { order: any; onClick: () => void }) {
+function OrderCard({ order, onClick, onRefill, selected, onToggleSelect, busy, onPause, onResume, onDelete }: {
+  order: any; onClick: () => void; onRefill?: () => void;
+  selected?: boolean; onToggleSelect?: () => void; busy?: boolean;
+  onPause?: () => void; onResume?: () => void; onDelete?: () => void;
+}) {
   const { formatPrice } = useCurrency();
   // Calculate progress
   const allRuns = order.items?.flatMap((item: any) => item.runs || []) || [];
@@ -289,6 +421,11 @@ function OrderCard({ order, onClick }: { order: any; onClick: () => void }) {
         <div className="flex items-start justify-between">
           <div>
             <div className="flex items-center gap-2 mb-1 flex-wrap">
+              {onToggleSelect && (
+                <span onClick={(e) => e.stopPropagation()}>
+                  <Checkbox checked={!!selected} onCheckedChange={() => onToggleSelect()} />
+                </span>
+              )}
               <CardTitle className="text-lg text-foreground">Order #{order.order_number}</CardTitle>
               <Badge className={statusColor}>
                 <StatusIcon className="h-3 w-3 mr-1" />
@@ -310,6 +447,42 @@ function OrderCard({ order, onClick }: { order: any; onClick: () => void }) {
               {order.link.length > 50 ? order.link.slice(0, 50) + '...' : order.link}
               <ExternalLink className="h-3 w-3" />
             </a>
+            {onRefill && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-2 h-8 px-3 text-xs gap-1.5"
+                onClick={(e) => { e.stopPropagation(); onRefill(); }}
+              >
+                <RefreshCw className="h-3.5 w-3.5" /> Refill (same curve)
+              </Button>
+            )}
+            <div className="mt-2 flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
+              {(effectiveStatus === 'pending' || effectiveStatus === 'processing' || effectiveStatus === 'started') && onPause && (
+                <Button variant="outline" size="sm" className="h-8 px-3 text-xs gap-1.5" disabled={busy} onClick={onPause}>
+                  <Pause className="h-3.5 w-3.5" /> Pause
+                </Button>
+              )}
+              {order.status === 'paused' && onResume && (
+                <Button variant="outline" size="sm" className="h-8 px-3 text-xs gap-1.5" disabled={busy} onClick={onResume}>
+                  <Play className="h-3.5 w-3.5" /> Resume
+                </Button>
+              )}
+              {onDelete && (
+                <Button variant="outline" size="sm" className="h-8 px-3 text-xs gap-1.5 text-destructive" disabled={busy} onClick={onDelete}>
+                  <Trash2 className="h-3.5 w-3.5" /> Delete
+                </Button>
+              )}
+              {effectiveStatus === 'completed' && (() => {
+                const doneAt = new Date(order.completed_at || order.updated_at || order.created_at).getTime();
+                const left = Math.max(0, Math.ceil((doneAt + REFILL_WINDOW_HOURS * 3600_000 - Date.now()) / 3600_000));
+                return left > 0 ? (
+                  <Badge variant="outline" className="border-border text-muted-foreground gap-1">
+                    <Timer className="h-3 w-3" /> Live for refill: {left}h left
+                  </Badge>
+                ) : null;
+              })()}
+            </div>
           </div>
           <div className="text-right flex items-center gap-2">
             <div>

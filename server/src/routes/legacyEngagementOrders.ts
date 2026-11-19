@@ -3,9 +3,100 @@ import { Router, type IRouter } from "express";
 import { z } from "zod";
 import { requireAuth, type AuthenticatedRequest } from "../middlewares/auth";
 import { resolveLegacyId } from "../lib/identity";
+import { kickRotationExecutor } from "../workers/multiProviderRotationWorker";
+import { validateCommentOrder } from "../lib/commentDelivery";
+import { paceRunsToViews } from "../lib/ratioPacing";
+import { runMaximum, runMinimum, shapeEngagementRuns } from "../lib/runShaping";
+
+export function normalizeReelLink(raw: string): string {
+  try {
+    const url = new URL(raw);
+    if (!/(^|\.)instagram\.com$/i.test(url.hostname)) return raw;
+    const path = url.pathname.replace(/\/+$/, "");
+    return `https://www.instagram.com${path}/`;
+  } catch {
+    return raw;
+  }
+}
 
 const router: IRouter = Router();
 router.use(requireAuth);
+
+function generateRandomVaryingRunsServer(total: number, min: number, maxSlots: number): number[] {
+  if (total <= 0) return [];
+  const effectiveMin = Math.max(1, min);
+  if (total <= effectiveMin) return [total];
+
+  const absoluteMaxRuns = Math.floor(total / effectiveMin);
+  if (absoluteMaxRuns <= 1) return [total];
+
+  const idealRuns = Math.max(2, Math.floor(total / (effectiveMin * 1.35)));
+  let targetRuns = Math.max(2, Math.min(maxSlots, absoluteMaxRuns, idealRuns));
+
+  if (targetRuns > 2 && targetRuns * effectiveMin === total) {
+    targetRuns = targetRuns - 1;
+  }
+
+  const runQuantities = new Array(targetRuns).fill(effectiveMin);
+  let remaining = total - (targetRuns * effectiveMin);
+
+  if (remaining > 0) {
+    const randWeights = Array.from({ length: targetRuns }, (_, i) => {
+      const pos = i / Math.max(1, targetRuns - 1);
+      const wave = Math.sin(pos * Math.PI) * 0.8 + 0.6;
+      const noise = 0.4 + Math.random() * 1.2;
+      return Math.max(0.1, wave * noise);
+    });
+    const sumW = randWeights.reduce((a, b) => a + b, 0);
+
+    let distributed = 0;
+    for (let i = 0; i < targetRuns; i++) {
+      const share = Math.floor((remaining * randWeights[i]) / sumW);
+      runQuantities[i] += share;
+      distributed += share;
+    }
+
+    let leftover = remaining - distributed;
+    while (leftover > 0) {
+      const idx = Math.floor(Math.random() * targetRuns);
+      runQuantities[idx] += 1;
+      leftover -= 1;
+    }
+  }
+
+  for (let pass = 0; pass < 5; pass++) {
+    for (let i = 0; i < targetRuns - 1; i++) {
+      if (runQuantities[i] === runQuantities[i + 1]) {
+        if (runQuantities[i] > effectiveMin + 1) {
+          runQuantities[i] -= 1;
+          runQuantities[i + 1] += 1;
+        } else {
+          const donorIdx = runQuantities.findIndex((q, idx) => idx !== i && idx !== i + 1 && q > effectiveMin + 1);
+          if (donorIdx !== -1) {
+            runQuantities[donorIdx] -= 1;
+            runQuantities[i] += 1;
+          }
+        }
+      }
+    }
+  }
+
+  let currentSum = runQuantities.reduce((a, b) => a + b, 0);
+  if (currentSum !== total) {
+    let diff = total - currentSum;
+    for (let i = 0; i < runQuantities.length && diff !== 0; i++) {
+      if (diff > 0) {
+        runQuantities[i] += 1;
+        diff -= 1;
+      } else if (diff < 0 && runQuantities[i] > effectiveMin) {
+        runQuantities[i] -= 1;
+        diff += 1;
+      }
+    }
+  }
+
+  return runQuantities;
+}
 
 const scheduledRunSchema = z.object({
   scheduled_at: z.string().datetime(),
@@ -15,6 +106,7 @@ const scheduledRunSchema = z.object({
   base_quantity: z.coerce.number().int().nonnegative().optional(),
   variance_applied: z.coerce.number().int().optional(),
   peak_multiplier: z.coerce.number().nonnegative().optional(),
+  custom_comments: z.string().optional(),
 });
 
 const providerMappingSchema = z.object({
@@ -28,14 +120,23 @@ const engagementSchema = z.object({
   quantity: z.coerce.number().int().positive(),
   user_service_id: z.string().uuid().nullable().optional(),
   user_bundle_item_id: z.string().uuid().nullable().optional(),
-  provider_mappings: z.array(providerMappingSchema).min(1),
+  provider_mappings: z.array(providerMappingSchema).default([]),
   scheduled_runs: z.array(scheduledRunSchema).optional(),
+  custom_comments: z.string().optional(),
 });
 
 const orderSchema = z.object({
+  order_name: z.string().trim().max(120).optional(),
+  curve_name: z.string().trim().max(160).optional(),
   user_bundle_id: z.string().uuid(),
-  link: z.string().trim().url().max(2048),
+  // Strip share/tracking query text (e.g. ?psln=, ?igsh=) so providers get the
+  // canonical Reel URL; some providers fail to resolve links with extra params.
+  link: z.string().trim().url().max(2048).transform(normalizeReelLink),
   base_quantity: z.coerce.number().int().positive(),
+  // Minutes to wait before the FIRST run goes to the provider (0 = instant).
+  start_delay_minutes: z.coerce.number().int().min(0).max(1440).optional(),
+  // Explicit opt-in only. Older clients and omitted flags always save OFF.
+  peak_hours_enabled: z.boolean().optional().default(false),
   engagements: z.array(engagementSchema).min(1).max(30),
 });
 
@@ -76,9 +177,30 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
     }> = [];
     let totalPrice = 0;
 
+    // Starting quantities used on this customer's recent Reels, per engagement,
+    // so every new Reel starts with a different first-run quantity. The bundle
+    // row lock above serializes mass orders, so each sees the previous one.
+    const recentStartRows = await client.query(
+      `SELECT i.engagement_type, r.quantity_to_send
+         FROM lovable_legacy.engagement_orders o
+         JOIN lovable_legacy.engagement_order_items i ON i.engagement_order_id=o.id
+         JOIN lovable_legacy.organic_run_schedule r ON r.engagement_order_item_id=i.id AND r.run_number=1
+        WHERE o.user_id=$1::uuid
+        ORDER BY o.order_number DESC
+        LIMIT 600`,
+      [userId],
+    );
+    const recentStarts = new Map<string, number[]>();
+    for (const row of recentStartRows.rows) {
+      const list = recentStarts.get(row.engagement_type) ?? [];
+      if (list.length < 25) list.push(Number(row.quantity_to_send));
+      recentStarts.set(row.engagement_type, list);
+    }
+
     for (const engagement of input.engagements) {
+      validateCommentOrder(engagement.type, engagement.custom_comments, engagement.quantity);
       const bundleItem = await client.query(
-        `SELECT id FROM lovable_legacy.user_bundle_items
+        `SELECT id, min_quantity, max_quantity FROM lovable_legacy.user_bundle_items
          WHERE user_bundle_id=$1::uuid AND user_id=$2::uuid
            AND ($3::uuid IS NULL OR id=$3::uuid)
            AND engagement_type=$4
@@ -107,10 +229,13 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
           (mapping) => `${mapping.user_provider_account_id}:${mapping.provider_service_id}`,
         ),
       );
-      const matched = allowed.rows.filter((row) =>
+      // The order page may hold a stale provider list (My Bundles edited after
+      // load). Live enabled My Bundles mappings are the source of truth.
+      const picked = allowed.rows.filter((row) =>
         requested.has(`${row.user_provider_account_id}:${row.provider_service_id}`),
       );
-      if (!matched.length) throw new Error(`${engagement.type} has no active provider mapping.`);
+      const matched = picked.length ? picked : allowed.rows;
+      if (!matched.length) throw new Error(`${engagement.type} has no enabled provider in My Bundles. Enable one provider for ${engagement.type} and try again.`);
 
       const services = matched.filter((row) => row.user_service_id);
       const pricedServices = services.filter((row) => Number(row.rate) > 0);
@@ -118,28 +243,44 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
         (best, row) => !best || Number(row.rate || 0) < Number(best.rate || 0) ? row : best,
         null,
       );
-      const providerMin = services.length
+      const serviceMin = services.length
         ? Math.min(...services.map((row) => Number(row.min_quantity) || 1))
         : 1;
+      // My Bundles minimum wins over the provider service minimum.
+      const providerMin = runMinimum(bundleItem.rows[0].min_quantity, serviceMin);
       const providerMax = services.length
         ? Math.max(...services.map((row) => Number(row.max_quantity) || 0))
         : 0;
-      // Drop zero-quantity runs (variance/rounding can produce them). If any are
-      // removed, redistribute the lost quantity onto the last remaining run so the
-      // scheduled total still matches engagement.quantity.
-      const rawRuns = engagement.scheduled_runs?.length
-        ? engagement.scheduled_runs
-        : [{
-            scheduled_at: new Date(Date.now() + 5 * 60_000).toISOString(),
-            quantity_to_send: engagement.quantity,
-            base_quantity: engagement.quantity,
-            variance_applied: 0,
-            peak_multiplier: 1,
-          }];
+      // Build runs: if scheduled_runs is empty, or collapsed to 1 run while quantity allows multiple runs,
+      // generate multiple organic runs distributed run-wise!
+      let inputRuns = (engagement.scheduled_runs?.length ? engagement.scheduled_runs : []).filter(r => r.quantity_to_send > 0);
+      if (inputRuns.length === 0 || (inputRuns.length === 1 && engagement.quantity >= providerMin * 2)) {
+        const effectiveMin = Math.max(1, providerMin);
+        const maxSlots = Math.min(10, Math.max(2, Math.floor(engagement.quantity / effectiveMin)));
+        const qtys = generateRandomVaryingRunsServer(engagement.quantity, effectiveMin, maxSlots);
+        const startTime = Date.now() + 5 * 60_000;
+        const totalDurationMs = Math.min(24, Math.max(2, Math.ceil(engagement.quantity / (effectiveMin * 2)))) * 60 * 60_000;
+        const intervalMs = qtys.length > 1 ? totalDurationMs / (qtys.length - 1) : 30 * 60_000;
+
+        inputRuns = qtys.map((qty, idx) => ({
+          scheduled_at: new Date(startTime + idx * intervalMs + Math.round((Math.random() - 0.5) * intervalMs * 0.25)).toISOString(),
+          quantity_to_send: qty,
+          base_quantity: qty,
+          variance_applied: 0,
+          peak_multiplier: 1,
+        }));
+      }
+      const rawRuns = inputRuns.length > 0 ? inputRuns : [{
+        scheduled_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+        quantity_to_send: engagement.quantity,
+        base_quantity: engagement.quantity,
+        variance_applied: 0,
+        peak_multiplier: 1,
+      }];
       const nonZeroRuns = rawRuns.filter((r) => r.quantity_to_send > 0);
       const lostQty = rawRuns.reduce((s, r) => s + r.quantity_to_send, 0)
                     - nonZeroRuns.reduce((s, r) => s + r.quantity_to_send, 0);
-      const runs = nonZeroRuns.length > 0
+      const builtRuns = nonZeroRuns.length > 0
         ? nonZeroRuns.map((r, i) =>
             i === nonZeroRuns.length - 1 && lostQty > 0
               ? { ...r, quantity_to_send: r.quantity_to_send + lostQty }
@@ -152,6 +293,15 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
             variance_applied: 0,
             peak_multiplier: 1,
           }];
+      // Small start + mixed run sizes (non-view engagements) and a starting
+      // quantity different from recent Reels (all engagements).
+      const runs = shapeEngagementRuns({
+        type: engagement.type,
+        runs: builtRuns,
+        min: providerMin,
+        max: runMaximum(bundleItem.rows[0].max_quantity, providerMax),
+        recentStarts: recentStarts.get(engagement.type) ?? [],
+      });
       const scheduledTotal = runs.reduce((sum, run) => sum + run.quantity_to_send, 0);
       if (scheduledTotal !== engagement.quantity) {
         throw new Error(`${engagement.type} schedule quantity does not match its order quantity.`);
@@ -181,13 +331,44 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       });
     }
 
+    // Honor the user's delivery start time per engagement: the first run of
+    // EVERY engagement (views, likes, comments...) starts at
+    // now + start_delay_minutes (0 = instant). Each engagement keeps its own
+    // relative run spacing (the organic curve).
+    const startDelayMs = Math.min(1440, Math.max(0, input.start_delay_minutes ?? 0)) * 60_000;
+    const startAt = Date.now() + startDelayMs;
+    for (const item of prepared) {
+      const runs = item.engagement.scheduled_runs ?? [];
+      const earliest = Math.min(...runs.map((run) => new Date(run.scheduled_at).getTime()));
+      if (!runs.length || !Number.isFinite(earliest)) continue;
+      const shiftMs = startAt - earliest;
+      item.engagement.scheduled_runs = runs.map((run) => ({
+        ...run,
+        scheduled_at: new Date(new Date(run.scheduled_at).getTime() + shiftMs).toISOString(),
+      }));
+    }
+
+    // Keep every engagement at its bundle % of views: delay non-view runs
+    // until the views scheduled before them reach the same share.
+    const paced = paceRunsToViews(prepared.map((item) => ({
+      type: item.engagement.type,
+      quantity: item.engagement.quantity,
+      runs: item.engagement.scheduled_runs ?? [],
+    })));
+    prepared.forEach((item, i) => {
+      item.engagement.scheduled_runs = [...paced[i]].sort(
+        (a, b) => Date.parse(a.scheduled_at) - Date.parse(b.scheduled_at),
+      );
+    });
+
     totalPrice = Math.round(totalPrice * 10_000) / 10_000;
     const orderResult = await client.query(
       `INSERT INTO lovable_legacy.engagement_orders
-         (user_id,user_bundle_id,link,base_quantity,total_price,is_organic_mode,status)
-       VALUES ($1::uuid,$2::uuid,$3,$4,$5,true,'processing')
+         (user_id,user_bundle_id,link,base_quantity,total_price,is_organic_mode,status,order_name,curve_name,peak_hours_enabled)
+       VALUES ($1::uuid,$2::uuid,$3,$4,$5,true,'processing',$6,$7,$8)
        RETURNING id,order_number`,
-      [userId, input.user_bundle_id, input.link, input.base_quantity, totalPrice],
+      [userId, input.user_bundle_id, input.link, input.base_quantity, totalPrice,
+        input.order_name || null, input.curve_name || null, input.peak_hours_enabled],
     );
     const order = orderResult.rows[0];
 
@@ -195,33 +376,52 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       const itemResult = await client.query(
         `INSERT INTO lovable_legacy.engagement_order_items
            (engagement_order_id,engagement_type,user_service_id,user_provider_account_id,
-            user_bundle_item_id,provider_mappings,quantity,price,status)
-         VALUES ($1::uuid,$2,$3::uuid,$4::uuid,$5::uuid,$6::jsonb,$7,$8,'pending')
+            user_bundle_item_id,provider_mappings,quantity,price,status,custom_comments)
+         VALUES ($1::uuid,$2,$3::uuid,$4::uuid,$5::uuid,$6::jsonb,$7,$8,'pending',$9)
          RETURNING id`,
         [
           order.id, item.engagement.type, item.userServiceId, item.providerAccountId,
           item.bundleItemId, JSON.stringify(item.mappings), item.engagement.quantity, item.price,
+          item.engagement.custom_comments ?? null,
         ],
       );
       const itemId = itemResult.rows[0].id;
       const runs = item.engagement.scheduled_runs ?? [];
+      const commentLines = (item.engagement.custom_comments ?? '')
+        .split(/\r?\n/)
+        .map((c: string) => c.trim())
+        .filter(Boolean);
+      let commentOffset = 0;
+
       for (let index = 0; index < runs.length; index += 1) {
         const run = runs[index];
+        let runComments: string | null = null;
+        if (commentLines.length > 0) {
+          const runQty = run.quantity_to_send;
+          const slice = commentLines.slice(commentOffset, commentOffset + runQty);
+          commentOffset += runQty;
+          if (slice.length > 0) {
+            runComments = slice.join("\n");
+          }
+        }
         await client.query(
           `INSERT INTO lovable_legacy.organic_run_schedule
              (order_id,engagement_order_item_id,run_number,scheduled_at,quantity_to_send,
-              base_quantity,variance_applied,peak_multiplier,status)
-           VALUES ($1::uuid,$2::uuid,$3,$4::timestamptz,$5,$6,$7,$8,'pending')`,
+              base_quantity,variance_applied,peak_multiplier,status,custom_comments)
+           VALUES ($1::uuid,$2::uuid,$3,$4::timestamptz,$5,$6,$7,$8,'pending',$9)`,
           [
             order.id, itemId, index + 1, run.scheduled_at, run.quantity_to_send,
             run.base_quantity ?? run.quantity_to_send, run.variance_applied ?? 0,
-            run.peak_multiplier ?? 1,
+            run.peak_multiplier ?? 1, runComments,
           ],
         );
       }
     }
 
     await client.query("COMMIT");
+    // Dispatch the first due run right away instead of waiting for the
+    // next 60-second worker tick, so instant orders reach the provider now.
+    kickRotationExecutor();
     res.status(201).json({
       success: true,
       order_id: order.id,
@@ -233,6 +433,115 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
     await client.query("ROLLBACK").catch(() => undefined);
     req.log.warn({ err: error }, "engagement order placement failed");
     res.status(400).json({ error: error instanceof Error ? error.message : "Order placement failed." });
+  } finally {
+    client.release();
+  }
+});
+
+const orderActionSchema = z.object({
+  order_ids: z.array(z.string().uuid()).min(1).max(200),
+  action: z.enum(["pause", "resume", "delete"]),
+});
+
+router.post("/functions/engagement-order-action", async (req, res): Promise<void> => {
+  const parsed = orderActionSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid request." });
+    return;
+  }
+  const { order_ids: orderIds, action } = parsed.data;
+  const client = await pool.connect();
+  try {
+    const userId = await getLegacyId(req as AuthenticatedRequest);
+    await client.query("BEGIN");
+
+    const owned = await client.query(
+      `SELECT id, status FROM lovable_legacy.engagement_orders
+        WHERE id=ANY($1::uuid[]) AND user_id=$2::uuid
+        FOR UPDATE`,
+      [orderIds, userId],
+    );
+    const ownedIds = owned.rows.filter((row) => row.status !== 'deleted').map((row) => row.id as string);
+    if (ownedIds.length === 0) {
+      await client.query("ROLLBACK");
+      res.status(404).json({ error: "No matching orders found." });
+      return;
+    }
+
+    let updated = 0;
+    if (action === "pause") {
+      // Pause exactly the selected Reel(s): any owned order that still has
+      // unsent runs (status may read 'partial' when some runs under-delivered).
+      const result = await client.query(
+        `UPDATE lovable_legacy.engagement_orders o
+            SET status='paused',updated_at=now()
+          WHERE o.id=ANY($1::uuid[]) AND o.status IN ('pending','processing','started','partial')
+            AND EXISTS (SELECT 1 FROM lovable_legacy.engagement_order_items i
+                          JOIN lovable_legacy.organic_run_schedule r ON r.engagement_order_item_id=i.id
+                         WHERE i.engagement_order_id=o.id AND r.status='pending' AND r.provider_order_id IS NULL)
+          RETURNING o.id`,
+        [ownedIds],
+      );
+      const pausedIds = result.rows.map((row) => row.id as string);
+      await client.query(
+        `UPDATE lovable_legacy.engagement_order_items i
+            SET status='paused',updated_at=now()
+          WHERE i.engagement_order_id=ANY($1::uuid[])
+            AND EXISTS (SELECT 1 FROM lovable_legacy.organic_run_schedule r
+                         WHERE r.engagement_order_item_id=i.id AND r.status='pending' AND r.provider_order_id IS NULL)`,
+        [pausedIds],
+      );
+      updated = result.rowCount ?? 0;
+    } else if (action === "resume") {
+      const result = await client.query(
+        `UPDATE lovable_legacy.engagement_orders
+            SET status='processing',updated_at=now()
+          WHERE id=ANY($1::uuid[]) AND status='paused'`,
+        [ownedIds],
+      );
+      await client.query(
+        `UPDATE lovable_legacy.engagement_order_items
+            SET status='processing',updated_at=now()
+          WHERE engagement_order_id=ANY($1::uuid[]) AND status='paused'`,
+        [ownedIds],
+      );
+      updated = result.rowCount ?? 0;
+    } else {
+      // delete: stop every run that has not reached a provider yet, then hide
+      // the order. Runs already sent to a provider cannot be pulled back.
+      await client.query(
+        `UPDATE lovable_legacy.organic_run_schedule run
+            SET status='cancelled',error_message='Cancelled by user',completed_at=now(),updated_at=now()
+          FROM lovable_legacy.engagement_order_items item
+          WHERE run.engagement_order_item_id=item.id
+            AND item.engagement_order_id=ANY($1::uuid[])
+            AND run.status IN ('pending','failed','dispatching')
+            AND run.provider_order_id IS NULL`,
+        [ownedIds],
+      );
+      await client.query(
+        `UPDATE lovable_legacy.engagement_order_items
+            SET status='cancelled',updated_at=now()
+          WHERE engagement_order_id=ANY($1::uuid[])
+            AND status NOT IN ('completed','cancelled','failed')`,
+        [ownedIds],
+      );
+      const result = await client.query(
+        `UPDATE lovable_legacy.engagement_orders
+            SET status='deleted',updated_at=now()
+          WHERE id=ANY($1::uuid[]) AND status<>'deleted'`,
+        [ownedIds],
+      );
+      updated = result.rowCount ?? 0;
+    }
+
+    await client.query("COMMIT");
+    if (action === "resume") kickRotationExecutor();
+    res.json({ success: true, updated });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    req.log.warn({ err: error }, "engagement order action failed");
+    res.status(400).json({ error: error instanceof Error ? error.message : "Action failed." });
   } finally {
     client.release();
   }

@@ -2,7 +2,7 @@
 // Converts user-drawn control points into delivery runs
 
 import { EngagementType, ENGAGEMENT_CONFIG } from './engagement-types';
-import { PROVIDER_MINIMUMS } from './organic-algorithm';
+import { PROVIDER_MINIMUMS, generateRandomVaryingRuns } from './organic-algorithm';
 
 export interface ControlPoint {
   id: string;
@@ -119,6 +119,22 @@ export function curveToSchedule(
       cumulativeQuantity: totalQuantity,
     }];
   }
+
+  // Small-quantity organic mode: guaranteed run-wise distribution with 0 negatives
+  if (totalQuantity >= 2 && totalQuantity < providerMin * 25) {
+    const runQuantities = generateRandomVaryingRuns(totalQuantity, providerMin, Math.min(8, Math.floor(totalQuantity / providerMin)));
+    const count = runQuantities.length;
+    let cum = 0;
+    return runQuantities.map((qty, i) => {
+      cum += qty;
+      return {
+        runNumber: i + 1,
+        timePercent: Math.round(((i + 1) / (count + 1)) * 100),
+        quantity: qty,
+        cumulativeQuantity: cum,
+      };
+    });
+  }
   
   // AI decides optimal number of runs based on quantity and type
   // More quantity = more runs for organic feel
@@ -198,6 +214,31 @@ export function curveToSchedule(
       });
     }
   }
+
+  // Jitter adjacent identical runs so every run has different numbers where possible
+  for (let pass = 0; pass < 4; pass++) {
+    for (let i = 0; i < runs.length - 1; i++) {
+      if (runs[i].quantity === runs[i + 1].quantity) {
+        if (runs[i].quantity > providerMin + 1) {
+          runs[i].quantity -= 1;
+          runs[i + 1].quantity += 1;
+        } else {
+          const donor = runs.find((r, idx) => idx !== i && idx !== i + 1 && r.quantity > providerMin + 1);
+          if (donor) {
+            donor.quantity -= 1;
+            runs[i].quantity += 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Recalculate cumulative
+  let cumTotal = 0;
+  runs.forEach((r) => {
+    cumTotal += r.quantity;
+    r.cumulativeQuantity = cumTotal;
+  });
   
   return runs;
 }
@@ -323,21 +364,25 @@ export interface CurvePreset {
   id: string;
   name: string;
   emoji: string;
+  tag?: string;
   description: string;
+  timeFactor?: number;
   getPoints: (type: EngagementType) => ControlPoint[];
 }
 
 export const CURVE_PRESETS: CurvePreset[] = [
   {
     id: 'viral-spike',
-    name: 'Viral Spike',
-    emoji: '🚀',
-    description: 'Slow start, explosive peak',
+    name: 'Viral Surge',
+    emoji: '⚡',
+    tag: 'Highest Approval',
+    description: 'Slow natural buildup, explosive viral peak',
+    timeFactor: 0.8,
     getPoints: (type) => [
       { id: `${type}-0`, x: 0, y: 0, type },
-      { id: `${type}-1`, x: 30, y: 5, type },
-      { id: `${type}-2`, x: 60, y: 15, type },
-      { id: `${type}-3`, x: 80, y: 70, type },
+      { id: `${type}-1`, x: 25, y: 5, type },
+      { id: `${type}-2`, x: 55, y: 25, type },
+      { id: `${type}-3`, x: 75, y: 80, type },
       { id: `${type}-4`, x: 100, y: 100, type },
     ],
   },
@@ -345,48 +390,132 @@ export const CURVE_PRESETS: CurvePreset[] = [
     id: 'steady-growth',
     name: 'Steady Growth',
     emoji: '📈',
-    description: 'Linear consistent growth',
+    tag: 'Safest',
+    description: 'Consistent linear distribution, ultra-low detection',
+    timeFactor: 1.0,
     getPoints: (type) => [
       { id: `${type}-0`, x: 0, y: 0, type },
-      { id: `${type}-1`, x: 100, y: 100, type },
+      { id: `${type}-1`, x: 50, y: 50, type },
+      { id: `${type}-2`, x: 100, y: 100, type },
     ],
   },
   {
     id: 's-curve',
-    name: 'S-Curve',
+    name: 'Natural S-Curve',
     emoji: '🌊',
-    description: 'Natural organic pattern',
+    tag: 'Natural',
+    description: 'Classic organic growth, gentle ramp-up to peak',
+    timeFactor: 1.0,
     getPoints: (type) => [
       { id: `${type}-0`, x: 0, y: 0, type },
-      { id: `${type}-1`, x: 25, y: 5, type },
+      { id: `${type}-1`, x: 20, y: 6, type },
       { id: `${type}-2`, x: 50, y: 50, type },
-      { id: `${type}-3`, x: 75, y: 95, type },
-      { id: `${type}-4`, x: 100, y: 100, type },
-    ],
-  },
-  {
-    id: 'double-peak',
-    name: 'Double Peak',
-    emoji: '⛰️',
-    description: 'Two growth phases',
-    getPoints: (type) => [
-      { id: `${type}-0`, x: 0, y: 0, type },
-      { id: `${type}-1`, x: 25, y: 40, type },
-      { id: `${type}-2`, x: 40, y: 30, type },
-      { id: `${type}-3`, x: 70, y: 85, type },
+      { id: `${type}-3`, x: 80, y: 94, type },
       { id: `${type}-4`, x: 100, y: 100, type },
     ],
   },
   {
     id: 'early-boost',
     name: 'Early Boost',
-    emoji: '⚡',
-    description: 'Fast start, gradual finish',
+    emoji: '🚀',
+    tag: 'Explore / FYP Push',
+    description: 'Fast launch in first 2h, then sustained trickle',
+    timeFactor: 0.85,
     getPoints: (type) => [
       { id: `${type}-0`, x: 0, y: 0, type },
-      { id: `${type}-1`, x: 20, y: 50, type },
-      { id: `${type}-2`, x: 50, y: 75, type },
+      { id: `${type}-1`, x: 20, y: 45, type },
+      { id: `${type}-2`, x: 50, y: 70, type },
       { id: `${type}-3`, x: 100, y: 100, type },
+    ],
+  },
+  {
+    id: 'evening-prime',
+    name: 'Evening Prime',
+    emoji: '🔥',
+    tag: 'Peak Hours Wave',
+    description: 'Late surge simulating peak active social media hours',
+    timeFactor: 0.9,
+    getPoints: (type) => [
+      { id: `${type}-0`, x: 0, y: 0, type },
+      { id: `${type}-1`, x: 35, y: 15, type },
+      { id: `${type}-2`, x: 65, y: 65, type },
+      { id: `${type}-3`, x: 85, y: 92, type },
+      { id: `${type}-4`, x: 100, y: 100, type },
+    ],
+  },
+  {
+    id: 'double-peak',
+    name: 'Double Wave Peak',
+    emoji: '⚡⚡',
+    tag: 'Viral Reshare',
+    description: 'Two separate surges (initial views + secondary wave)',
+    timeFactor: 1.1,
+    getPoints: (type) => [
+      { id: `${type}-0`, x: 0, y: 0, type },
+      { id: `${type}-1`, x: 25, y: 40, type },
+      { id: `${type}-2`, x: 45, y: 35, type },
+      { id: `${type}-3`, x: 75, y: 85, type },
+      { id: `${type}-4`, x: 100, y: 100, type },
+    ],
+  },
+  {
+    id: 'slow-burn',
+    name: 'Slow Burn',
+    emoji: '🐢',
+    tag: 'Max Stealth',
+    description: 'Very gradual, extended delivery for brand accounts',
+    timeFactor: 1.35,
+    getPoints: (type) => [
+      { id: `${type}-0`, x: 0, y: 0, type },
+      { id: `${type}-1`, x: 40, y: 18, type },
+      { id: `${type}-2`, x: 70, y: 48, type },
+      { id: `${type}-3`, x: 100, y: 100, type },
+    ],
+  },
+  {
+    id: 'algo-drip',
+    name: 'Algorithmic Drip',
+    emoji: '🎯',
+    tag: 'Smart Pacing',
+    description: 'Micro-bursts with resting pauses mimicking shares',
+    timeFactor: 1.1,
+    getPoints: (type) => [
+      { id: `${type}-0`, x: 0, y: 0, type },
+      { id: `${type}-1`, x: 20, y: 22, type },
+      { id: `${type}-2`, x: 40, y: 30, type },
+      { id: `${type}-3`, x: 60, y: 65, type },
+      { id: `${type}-4`, x: 80, y: 75, type },
+      { id: `${type}-5`, x: 100, y: 100, type },
+    ],
+  },
+  {
+    id: 'morning-kick',
+    name: 'Morning Kick',
+    emoji: '🌅',
+    tag: 'Morning Prime',
+    description: 'Early morning momentum with steady afternoon flow',
+    timeFactor: 0.95,
+    getPoints: (type) => [
+      { id: `${type}-0`, x: 0, y: 0, type },
+      { id: `${type}-1`, x: 15, y: 35, type },
+      { id: `${type}-2`, x: 45, y: 55, type },
+      { id: `${type}-3`, x: 75, y: 80, type },
+      { id: `${type}-4`, x: 100, y: 100, type },
+    ],
+  },
+  {
+    id: 'high-velocity',
+    name: 'High-Velocity Explode',
+    emoji: '🏆',
+    tag: 'Trend Booster',
+    description: 'Aggressive rapid acceleration for trending audio & challenges',
+    timeFactor: 0.75,
+    getPoints: (type) => [
+      { id: `${type}-0`, x: 0, y: 0, type },
+      { id: `${type}-1`, x: 15, y: 50, type },
+      { id: `${type}-2`, x: 35, y: 85, type },
+      { id: `${type}-3`, x: 70, y: 96, type },
+      { id: `${type}-4`, x: 100, y: 100, type },
     ],
   },
 ];

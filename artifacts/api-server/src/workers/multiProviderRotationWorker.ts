@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 // Background ticks use their own small pool so they never hold connections
 // that interactive requests are waiting for.
-import { workerPool as pool } from "@workspace/db";
+import { workerPool as pool } from "../db";
 import { decryptProviderCredential } from "../lib/providerCredentials";
 import { logger } from "../lib/logger";
 
@@ -246,6 +246,9 @@ async function dispatch(run: any): Promise<void> {
         link: run.link,
         quantity: String(run.quantity_to_send),
       });
+      if (run.comments_text && String(run.comments_text).trim()) {
+        params.set("comments", String(run.comments_text).trim());
+      }
       response = await fetch(safePanelUrl(account.api_url), {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "BoostlyPro/1.0 (+api)" },

@@ -32,16 +32,16 @@ interface OrderProgressChartProps {
 
 // Distinct vibrant colors for each engagement type - easily distinguishable
 const TYPE_COLORS: Record<string, string> = {
-  views: "#3b82f6",      // Blue - Primary, most visible
-  likes: "#2563eb",      // Pink - Warm, distinct from blue
-  comments: "#3b82f6",   // Emerald Green - Cool, stands out
-  saves: "#f59e0b",      // Amber/Orange - Warm accent
-  shares: "#8b5cf6",     // Violet/Purple - Distinct cool tone
-  followers: "#06b6d4",  // Cyan - Fresh, tech feel
-  subscribers: "#ef4444", // Red - Strong contrast
-  watch_hours: "#f97316", // Orange - Warm, energetic
-  retweets: "#14b8a6",   // Teal - Cool, calm
-  reposts: "#1D5CFF",    // Purple - Rich, distinct
+  views: "#3b82f6",
+  likes: "#ec4899",
+  comments: "#10b981",
+  saves: "#f59e0b",
+  shares: "#8b5cf6",
+  followers: "#06b6d4",
+  subscribers: "#ef4444",
+  watch_hours: "#f97316",
+  retweets: "#14b8a6",
+  reposts: "#84cc16",
 };
 
 export function OrderProgressChart({ runs, perType }: OrderProgressChartProps) {
@@ -234,6 +234,7 @@ export function OrderProgressChart({ runs, perType }: OrderProgressChartProps) {
                   style={{ backgroundColor: color }}
                 />
                 
+                <span className="text-xs text-muted-foreground">{config?.label || type}</span>
                 <span className="text-xs font-bold text-foreground">
                   {delivered.toLocaleString()}/{scheduled.toLocaleString()}
                 </span>
@@ -245,8 +246,58 @@ export function OrderProgressChart({ runs, perType }: OrderProgressChartProps) {
       </CardHeader>
 
       <CardContent className="p-3 sm:p-6">
-        {/* Chart - Each service shows its ACTUAL quantity (not stacked) */}
-        <div className="h-[280px] w-full">
+        {(() => {
+          const viewTypes = activeTypes.filter((t) => t === "views");
+          const engagementTypes = activeTypes.filter((t) => t !== "views");
+          return (
+            <div className="space-y-6">
+              {viewTypes.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground mb-2">Views</p>
+                  <ProgressLines chartData={chartData} types={viewTypes} height="h-[240px] w-full" />
+                </div>
+              )}
+              {engagementTypes.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground mb-2">All Engagement (Likes, Comments, Saves, Shares, Reposts…)</p>
+                  <ProgressLines chartData={chartData} types={engagementTypes} height="h-[240px] w-full" />
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* Legend - shows only active engagement types */}
+        <div className="flex flex-wrap items-center justify-center gap-4 mt-4 pt-4 border-t border-border">
+          {activeTypes.map(type => {
+            const config = ENGAGEMENT_CONFIG[type as EngagementType];
+            return (
+              <div key={type} className="flex items-center gap-2">
+                <div 
+                  className="w-3 h-3 rounded-full" 
+                  style={{ backgroundColor: TYPE_COLORS[type] || '#888' }}
+                />
+                <span className="text-xs text-muted-foreground">{config?.label || type}</span>
+              </div>
+            );
+          })}
+          {stats && stats.startedRuns > 0 && (
+            <div className="flex items-center gap-2 ml-4 pl-4 border-l border-border">
+              <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+              <span className="text-xs text-muted-foreground">{stats.startedRuns} in progress</span>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ProgressLines({ chartData, types, height }: { chartData: Record<string, any>[]; types: string[]; height: string }) {
+  return (
+    <>
+        
+        <div className={height}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
@@ -283,7 +334,7 @@ export function OrderProgressChart({ runs, perType }: OrderProgressChartProps) {
                                 className="w-2 h-2 rounded-full" 
                                 style={{ backgroundColor: TYPE_COLORS[type] || '#888' }}
                               />
-                              
+                              <span className="text-muted-foreground">{config?.label || type}</span>
                               <span className="font-bold">{(entry.value as number).toLocaleString()}</span>
                             </div>
                           );
@@ -296,7 +347,7 @@ export function OrderProgressChart({ runs, perType }: OrderProgressChartProps) {
               />
               
               {/* Separate lines for each engagement type - NO stacking, actual quantities */}
-              {activeTypes.map(type => (
+              {types.map(type => (
                 <Line
                   key={type}
                   type="monotone"
@@ -310,29 +361,6 @@ export function OrderProgressChart({ runs, perType }: OrderProgressChartProps) {
             </LineChart>
           </ResponsiveContainer>
         </div>
-
-        {/* Legend - shows only active engagement types */}
-        <div className="flex flex-wrap items-center justify-center gap-4 mt-4 pt-4 border-t border-border">
-          {activeTypes.map(type => {
-            const config = ENGAGEMENT_CONFIG[type as EngagementType];
-            return (
-              <div key={type} className="flex items-center gap-2">
-                <div 
-                  className="w-3 h-3 rounded-full" 
-                  style={{ backgroundColor: TYPE_COLORS[type] || '#888' }}
-                />
-                <span className="text-xs text-muted-foreground">{config?.label || type}</span>
-              </div>
-            );
-          })}
-          {stats && stats.startedRuns > 0 && (
-            <div className="flex items-center gap-2 ml-4 pl-4 border-l border-border">
-              <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-              <span className="text-xs text-muted-foreground">{stats.startedRuns} in progress</span>
-            </div>
-          )}
-        </div>
-      </CardContent>
-    </Card>
+    </>
   );
 }

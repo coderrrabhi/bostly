@@ -4,6 +4,7 @@
 // Designed to be 100% undetectable by platform algorithms
 // ===============================================
 
+import { minOrderFor, usPeakOffsetMs } from "./organic-extras";
 export interface OrganicRunConfig {
   runNumber: number;
   scheduledAt: Date;
@@ -43,66 +44,198 @@ const ENGAGEMENT_REACTION_TIMING: Record<string, { startViewIndex: number; minDe
   watch_hours: { startViewIndex: 0, minDelay: 10, maxDelay: 25 },
 };
 
+// Max quantity per single run for very sparse types (comments: 1, sometimes 2; never above 2).
+const PER_RUN_CAP: Record<string, number> = { comments: 2 };
+
 /**
  * Coordinate a full-engagement order around its Views reach curve.
- * Quantities remain independently randomized, but reactions cannot precede Views.
+ * Every reaction run is tied to one Views run: its quantity follows that run's
+ * views (e.g. ~4–5 likes per 250 views at a 1.5–2% ratio), comments go out
+ * 1 at a time (sometimes 2), and everything settles inside the Views window.
+ * The per-type TOTAL (from the bundle Min%–Max%) is never changed.
  */
-export function coordinateEngagementSchedules(schedules: FullOrganicConfig[]): FullOrganicConfig[] {
+/**
+ * Generates truly random, varying quantities across multiple runs for any engagement type
+ * (shares, saves, reposts, comments, likes, views).
+ * 
+ * Rules:
+ * 1. Every run quantity is ALWAYS >= min (never below provider/configured minimum).
+ * 2. Sum of all runs EXACTLY equals total.
+ * 3. Quantities are organically varied (no robotic repeating identical numbers like 10, 10, 10, 10).
+ * 4. Number of runs adapts so there is always variance budget.
+ */
+export function generateRandomVaryingRuns(total: number, min: number, maxSlots: number): number[] {
+  if (total <= 0) return [];
+  const effectiveMin = Math.max(1, min);
+  if (total <= effectiveMin) return [total];
+
+  const absoluteMaxRuns = Math.floor(total / effectiveMin);
+  if (absoluteMaxRuns <= 1) return [total];
+
+  // We want healthy variance so runs don't degenerate into all identical minimums.
+  // Leave a variance buffer: target average >= effectiveMin * 1.35 whenever possible.
+  const idealRuns = Math.max(2, Math.floor(total / (effectiveMin * 1.35)));
+  let targetRuns = Math.max(2, Math.min(maxSlots, absoluteMaxRuns, idealRuns));
+
+  // If targetRuns * effectiveMin == total, there is 0 remaining quantity to vary!
+  // In that case, reduce targetRuns by at least 1 (if targetRuns > 2) so we have variance budget.
+  if (targetRuns > 2 && targetRuns * effectiveMin === total) {
+    targetRuns = targetRuns - 1;
+  }
+
+  const runQuantities = new Array(targetRuns).fill(effectiveMin);
+  let remaining = total - (targetRuns * effectiveMin);
+
+  if (remaining > 0) {
+    // Generate distinct random variance weights
+    const randWeights = Array.from({ length: targetRuns }, (_, i) => {
+      const pos = i / Math.max(1, targetRuns - 1);
+      const wave = Math.sin(pos * Math.PI) * 0.8 + 0.6; // gentle natural curve
+      const noise = 0.4 + Math.random() * 1.2;          // natural noise
+      return Math.max(0.1, wave * noise);
+    });
+    const sumW = randWeights.reduce((a, b) => a + b, 0);
+
+    let distributed = 0;
+    for (let i = 0; i < targetRuns; i++) {
+      const share = Math.floor((remaining * randWeights[i]) / sumW);
+      runQuantities[i] += share;
+      distributed += share;
+    }
+
+    let leftover = remaining - distributed;
+    while (leftover > 0) {
+      const idx = Math.floor(Math.random() * targetRuns);
+      runQuantities[idx] += 1;
+      leftover -= 1;
+    }
+  }
+
+  // PASS: Anti-repetition pass to break any adjacent or repeating identical quantities
+  for (let pass = 0; pass < 5; pass++) {
+    for (let i = 0; i < targetRuns - 1; i++) {
+      if (runQuantities[i] === runQuantities[i + 1]) {
+        if (runQuantities[i] > effectiveMin + 1) {
+          runQuantities[i] -= 1;
+          runQuantities[i + 1] += 1;
+        } else {
+          const donorIdx = runQuantities.findIndex((q, idx) => idx !== i && idx !== i + 1 && q > effectiveMin + 1);
+          if (donorIdx !== -1) {
+            runQuantities[donorIdx] -= 1;
+            runQuantities[i] += 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Final check: sum === total without any run dropping below effectiveMin
+  let currentSum = runQuantities.reduce((a, b) => a + b, 0);
+  if (currentSum !== total) {
+    let diff = total - currentSum;
+    for (let i = 0; i < runQuantities.length && diff !== 0; i++) {
+      if (diff > 0) {
+        runQuantities[i] += 1;
+        diff -= 1;
+      } else if (diff < 0 && runQuantities[i] > effectiveMin) {
+        runQuantities[i] -= 1;
+        diff += 1;
+      }
+    }
+  }
+
+  return runQuantities;
+}
+
+export function coordinateEngagementSchedules(
+  schedules: FullOrganicConfig[],
+  minimums: Record<string, number | undefined> = {},
+): FullOrganicConfig[] {
   const viewsSchedule = schedules.find((schedule) => schedule.engagementType.toLowerCase() === 'views');
   if (!viewsSchedule?.runs.length) return schedules;
 
   const viewRuns = [...viewsSchedule.runs].sort(
     (left, right) => left.scheduledAt.getTime() - right.scheduledAt.getTime(),
   );
+  const viewTimes = viewRuns.map((run) => run.scheduledAt.getTime());
+  const slotCount = viewRuns.length;
+  const avgGap = slotCount > 1 ? (viewTimes[slotCount - 1] - viewTimes[0]) / (slotCount - 1) : 30 * 60_000;
+  const tailMs = slotCount > 1 ? Math.min(10 * 60_000, Math.max(2 * 60_000, avgGap * 0.5)) : 30 * 60_000;
 
   return schedules.map((schedule) => {
     const type = schedule.engagementType.toLowerCase();
     if (type === 'views' || schedule.runs.length === 0) return schedule;
 
-    const timing = ENGAGEMENT_REACTION_TIMING[type] ?? {
-      startViewIndex: 1,
-      minDelay: 20,
-      maxDelay: 50,
-    };
-    const originalRuns = [...schedule.runs].sort(
-      (left, right) => left.scheduledAt.getTime() - right.scheduledAt.getTime(),
-    );
-    const startAnchor = Math.min(timing.startViewIndex, viewRuns.length - 1);
-    const endAnchor = Math.max(startAnchor, viewRuns.length - 2);
-    let previousTime = viewRuns[0].scheduledAt.getTime();
+    const runSum = schedule.runs.reduce((sum, run) => sum + Math.max(0, run.quantity), 0);
+    // Keep the exact requested amount (bundle Min%–Max% of views), not the generator's rounded run sum.
+    const total = Math.round(schedule.totalQuantity) > 0 ? Math.round(schedule.totalQuantity) : runSum;
+    if (total <= 0) return schedule;
+    const min = Math.max(1, minOrderFor(type, Math.floor(Number(minimums[type] ?? minimums[schedule.engagementType]) || 1)) ?? 1);
+    // Organic weight of every Views run (bigger views run = bigger reaction run, with noise).
+    const weights = viewRuns.map((run) => Math.max(1, run.quantity) * (0.6 + Math.random() * 0.8));
+    const meanW = weights.reduce((a, b) => a + b, 0) / Math.max(1, weights.length);
+    const sizes: { slot: number; qty: number }[] = [];
 
-    const coordinatedRuns = originalRuns.map((run, index) => {
-      const progress = originalRuns.length === 1 ? 0 : index / (originalRuns.length - 1);
-      const anchorIndex = Math.min(
-        viewRuns.length - 1,
-        Math.round(startAnchor + progress * (endAnchor - startAnchor)),
-      );
-      const anchorTime = viewRuns[anchorIndex].scheduledAt.getTime();
-      const delayMinutes = timing.minDelay + Math.random() * (timing.maxDelay - timing.minDelay);
-      const organicJitterMinutes = index === 0 ? 0 : Math.random() * 8;
-      const scheduledTime = Math.max(
-        anchorTime + (delayMinutes + organicJitterMinutes) * 60_000,
-        previousTime + (index === 0 ? 1 : 5) * 60_000,
-      );
-      previousTime = scheduledTime;
-      const scheduledAt = new Date(scheduledTime);
+    // Generate random varying runs across all engagement types (shares, saves, reposts, comments, likes)
+    // Every run is >= min (never below provider/user minimum) and has natural random variations
+    const runQuantities = generateRandomVaryingRuns(total, min, slotCount);
+    const targetRuns = runQuantities.length;
 
-      return {
-        ...run,
-        runNumber: index + 1,
-        scheduledAt,
-        dayOfWeek: scheduledAt.getDay(),
-        hourOfDay: scheduledAt.getHours(),
-      };
+    // Pick which Views slots carry these reaction runs
+    const chosenSlots = [...Array(slotCount).keys()]
+      .map((slot) => ({ slot, key: Math.pow(Math.random(), meanW / Math.max(1, weights[slot])) }))
+      .sort((a, b) => b.key - a.key)
+      .slice(0, targetRuns)
+      .map((x) => x.slot)
+      .sort((a, b) => a - b);
+
+    runQuantities.forEach((qty, i) => {
+      sizes.push({ slot: chosenSlots[i] ?? (i % slotCount), qty });
     });
+
+    // 4) Time each run after its Views run and before the next one.
+    const template = schedule.runs[0];
+    let previousTime = -Infinity;
+    const bySlot = new Map<number, number[]>();
+    sizes.forEach((s, idx) => bySlot.set(s.slot, [...(bySlot.get(s.slot) ?? []), idx]));
+    const times: number[] = new Array(sizes.length);
+    bySlot.forEach((indexes, slot) => {
+      const from = viewTimes[slot];
+      const to = slot < slotCount - 1 ? viewTimes[slot + 1] : from + tailMs;
+      const span = Math.max(60_000, to - from);
+      const points = indexes
+        .map(() => from + span * (0.1 + Math.random() * 0.8))
+        .sort((a, b) => a - b);
+      indexes.forEach((idx, k) => { times[idx] = points[k]; });
+    });
+
+    const coordinatedRuns: OrganicRunConfig[] = sizes
+      .map((s, idx) => ({ ...s, time: times[idx] }))
+      .sort((a, b) => a.time - b.time)
+      .map((s, index) => {
+        const time = Math.max(s.time, previousTime + 60_000);
+        previousTime = time;
+        const scheduledAt = new Date(time);
+        return {
+          ...template,
+          runNumber: index + 1,
+          scheduledAt,
+          quantity: s.qty,
+          baseQuantity: s.qty,
+          varianceApplied: 0,
+          dayOfWeek: scheduledAt.getDay(),
+          hourOfDay: scheduledAt.getHours(),
+        };
+      });
 
     return {
       ...schedule,
+      totalQuantity: total,
       runs: coordinatedRuns,
       totalDuration: coordinatedRuns.length > 1
         ? coordinatedRuns[coordinatedRuns.length - 1].scheduledAt.getTime() - coordinatedRuns[0].scheduledAt.getTime()
         : 0,
-      warnings: [...schedule.warnings, 'Coordinated with Views reach for full-engagement delivery'],
+      warnings: [...schedule.warnings, 'Follows the Views curve: each run is sized by the views delivered just before it'],
     };
   });
 }
@@ -110,11 +243,12 @@ export function coordinateEngagementSchedules(schedules: FullOrganicConfig[]): F
 // Provider minimum order quantity FALLBACKS (actual values come from service table via minQuantity prop)
 // These are last-resort defaults only — real min comes from DB service.min_quantity
 export const PROVIDER_MINIMUMS: Record<string, number> = {
-  views: 100,
-  likes: 10,
-  comments: 10,
+  views: 101,
+  likes: 2,
+  comments: 1,
+  reposts: 1,
   saves: 10,
-  shares: 10,
+  shares: 2,
 };
 
 // Provider maximum order quantity
@@ -549,7 +683,7 @@ export function generateOrganicSchedule(
   if (totalQuantity < providerMin) {
     warnings.push(`Total quantity ${totalQuantity} is below provider minimum ${providerMin}`);
     const now = startTime;
-    const istOffset = 5.5 * 60 * 60 * 1000;
+    const istOffset = usPeakOffsetMs();
     const istTime = new Date(now.getTime() + istOffset);
 
     runs.push({
@@ -587,59 +721,19 @@ export function generateOrganicSchedule(
   // For totals up to 25x the provider minimum, we use a denser splitting logic
   const shouldSmallQuantitySplit = maxRunsByMin >= 2 && totalQuantity < providerMin * 25;
   if (shouldSmallQuantitySplit) {
-    // Distribute across 2-8 runs naturally, but leave "quantity budget" for variety
-    const numRuns = Math.max(2, Math.min(8, Math.floor(maxRunsByMin * 0.7)));
-    let remainingForSmall = totalQuantity;
+    // Generate random varying runs: each >= providerMin, sum === totalQuantity, naturally varied
+    const runQuantities = generateRandomVaryingRuns(totalQuantity, providerMin, Math.min(8, maxRunsByMin));
+    const numRuns = runQuantities.length;
 
-    const istOffset = 5.5 * 60 * 60 * 1000;
+    const istOffset = usPeakOffsetMs();
 
     // Interval based on time limit or type defaults
     const targetIntervalMinutes = timeLimitHours && timeLimitHours > 0
-      ? (timeLimitHours * 60 * 0.8) / (numRuns - 1)
+      ? (timeLimitHours * 60 * 0.8) / Math.max(1, numRuns - 1)
       : typeInterval.min + Math.random() * (typeInterval.max - typeInterval.min);
 
     for (let i = 0; i < numRuns; i++) {
-      const runsLeft = numRuns - i;
-      const minNeededAfter = (runsLeft - 1) * providerMin;
-
-      let batchQty: number;
-      if (i === numRuns - 1) {
-        batchQty = remainingForSmall; // remainder
-      } else {
-        const minAllowed = providerMin;
-        const maxAllowed = remainingForSmall - minNeededAfter;
-
-        // Pick a slightly-randomized "ideal" size but clamp to legal range
-        const ideal = Math.round((remainingForSmall / runsLeft) * (0.6 + Math.random() * 0.8));
-        batchQty = Math.max(minAllowed, Math.min(ideal, maxAllowed));
-
-        // ULTRA-STRICT ANTI-REPEAT: Never use same quantity twice in one schedule for small orders
-        if (runs.length > 0) {
-          const usedQuantities = runs.map(r => r.quantity);
-          let attempts = 0;
-          const primeJitters = [1, 2, 3, 5, 7];
-
-          while (usedQuantities.includes(batchQty) && attempts < 15 && maxAllowed > minAllowed) {
-            const nudge = primeJitters[attempts % primeJitters.length];
-            const nextUp = batchQty + nudge;
-            const nextDown = batchQty - nudge;
-
-            if (nextUp <= maxAllowed && !usedQuantities.includes(nextUp)) {
-              batchQty = nextUp;
-              break;
-            } else if (nextDown >= minAllowed && !usedQuantities.includes(nextDown)) {
-              batchQty = nextDown;
-              break;
-            }
-            attempts++;
-          }
-        }
-        // Final Anti-Round: ensure no round multiples of 5/10 if range allows
-        if (batchQty % 5 === 0 && batchQty > minAllowed) {
-          if (batchQty + 1 <= maxAllowed) batchQty += 1;
-          else if (batchQty - 1 >= minAllowed) batchQty -= 1;
-        }
-      }
+      const batchQty = runQuantities[i];
 
       // Schedule time with jitter
       let scheduleTime: Date;
@@ -648,8 +742,8 @@ export function generateOrganicSchedule(
         scheduleTime = new Date(startTime.getTime() + initialDelay);
       } else {
         const prevTime = runs[runs.length - 1].scheduledAt;
-        const intervalMs = targetIntervalMinutes * 60 * 1000;
-        const jitterMs = (Math.random() - 0.5) * intervalMs * 0.6; // ±30% jitter
+        const intervalMs = Math.max(60_000, targetIntervalMinutes * 60 * 1000);
+        const jitterMs = (Math.random() - 0.5) * intervalMs * 0.4;
         scheduleTime = new Date(prevTime.getTime() + intervalMs + jitterMs);
       }
 
@@ -668,25 +762,20 @@ export function generateOrganicSchedule(
         humanBehaviorScore: 70 + Math.floor(Math.random() * 20),
         patternBreaker: false,
       });
-
-      remainingForSmall -= batchQty;
-      if (remainingForSmall <= 0) break;
     }
 
-    const finalizedRuns = finalizeUniqueRuns(runs, totalQuantity, providerMin, Math.max(providerMin + numRuns + 10, typeRunSize.max));
-
-    const totalDurationSmall = finalizedRuns.length > 1
-      ? finalizedRuns[finalizedRuns.length - 1].scheduledAt.getTime() - finalizedRuns[0].scheduledAt.getTime()
+    const totalDurationSmall = runs.length > 1
+      ? runs[runs.length - 1].scheduledAt.getTime() - runs[0].scheduledAt.getTime()
       : 0;
 
     return {
       engagementType,
       totalQuantity,
-      runs: finalizedRuns,
+      runs,
       totalDuration: totalDurationSmall,
       warnings,
       patternBreakCount: 0,
-      avgHumanScore: Math.round(finalizedRuns.reduce((s, r) => s + r.humanBehaviorScore, 0) / finalizedRuns.length),
+      avgHumanScore: Math.round(runs.reduce((s, r) => s + r.humanBehaviorScore, 0) / runs.length),
       varietyIndex: 45,
     };
   }
@@ -694,7 +783,7 @@ export function generateOrganicSchedule(
   // HARD TIME LIMIT MODE: When user selects 6h/12h/etc, schedule MUST finish within that window.
   // We intentionally reduce chaos/pause logic here so the deadline is respected.
   if (timeLimitHours && timeLimitHours > 0) {
-    const istOffset = 5.5 * 60 * 60 * 1000;
+    const istOffset = usPeakOffsetMs();
 
     const timeLimitMs = timeLimitHours * 60 * 60 * 1000;
     const scheduleEndMs = startTime.getTime() + timeLimitMs;
@@ -1013,7 +1102,7 @@ export function generateOrganicSchedule(
     const scheduledAt = new Date(currentTime.getTime() + jitterMs);
 
     // Calculate IST time for peak hours and day patterns
-    const istOffset = 5.5 * 60 * 60 * 1000;
+    const istOffset = usPeakOffsetMs();
     const istTime = new Date(scheduledAt.getTime() + istOffset);
     const hour = istTime.getUTCHours();
     const dayOfWeek = istTime.getUTCDay();
@@ -1242,7 +1331,7 @@ export function generateOrganicSchedule(
       const intervalMs = (typeIntervalForRemaining.min + Math.random() * (typeIntervalForRemaining.max - typeIntervalForRemaining.min)) * 60 * 1000;
       const scheduledAt = new Date(currentTime.getTime() + intervalMs);
 
-      const istOffset = 5.5 * 60 * 60 * 1000;
+      const istOffset = usPeakOffsetMs();
       const istTime = new Date(scheduledAt.getTime() + istOffset);
 
       runs.push({
@@ -1352,7 +1441,7 @@ export function validateQuantityForProvider(
  * Get peak hour label for a given time
  */
 export function getPeakLabel(date: Date): string {
-  const istOffset = 5.5 * 60 * 60 * 1000;
+  const istOffset = usPeakOffsetMs();
   const istTime = new Date(date.getTime() + istOffset);
   const hour = istTime.getUTCHours();
 

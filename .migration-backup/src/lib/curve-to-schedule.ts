@@ -2,7 +2,7 @@
 // Converts user-drawn control points into delivery runs
 
 import { EngagementType, ENGAGEMENT_CONFIG } from './engagement-types';
-import { PROVIDER_MINIMUMS } from './organic-algorithm';
+import { PROVIDER_MINIMUMS, generateRandomVaryingRuns } from './organic-algorithm';
 
 export interface ControlPoint {
   id: string;
@@ -119,6 +119,22 @@ export function curveToSchedule(
       cumulativeQuantity: totalQuantity,
     }];
   }
+
+  // Small-quantity organic mode: guaranteed run-wise distribution with 0 negatives
+  if (totalQuantity >= 2 && totalQuantity < providerMin * 25) {
+    const runQuantities = generateRandomVaryingRuns(totalQuantity, providerMin, Math.min(8, Math.floor(totalQuantity / providerMin)));
+    const count = runQuantities.length;
+    let cum = 0;
+    return runQuantities.map((qty, i) => {
+      cum += qty;
+      return {
+        runNumber: i + 1,
+        timePercent: Math.round(((i + 1) / (count + 1)) * 100),
+        quantity: qty,
+        cumulativeQuantity: cum,
+      };
+    });
+  }
   
   // AI decides optimal number of runs based on quantity and type
   // More quantity = more runs for organic feel
@@ -198,6 +214,31 @@ export function curveToSchedule(
       });
     }
   }
+
+  // Jitter adjacent identical runs so every run has different numbers where possible
+  for (let pass = 0; pass < 4; pass++) {
+    for (let i = 0; i < runs.length - 1; i++) {
+      if (runs[i].quantity === runs[i + 1].quantity) {
+        if (runs[i].quantity > providerMin + 1) {
+          runs[i].quantity -= 1;
+          runs[i + 1].quantity += 1;
+        } else {
+          const donor = runs.find((r, idx) => idx !== i && idx !== i + 1 && r.quantity > providerMin + 1);
+          if (donor) {
+            donor.quantity -= 1;
+            runs[i].quantity += 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Recalculate cumulative
+  let cumTotal = 0;
+  runs.forEach((r) => {
+    cumTotal += r.quantity;
+    r.cumulativeQuantity = cumTotal;
+  });
   
   return runs;
 }

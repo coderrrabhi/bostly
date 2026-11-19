@@ -37,6 +37,7 @@ interface EngagementTypeCardProps {
   baseQuantity: number;
   onChange: (config: EngagementConfig) => void;
   minQuantity?: number;
+  maxQuantity?: number;
   customCurvePoints?: ControlPoint[];
   pricePerK?: number; // Price per 1000 units for accurate price recalculation
   // EXACT schedule (from DeliveryPreview / saved to backend on submit).
@@ -74,6 +75,7 @@ export function EngagementTypeCard({
   baseQuantity,
   onChange,
   minQuantity,
+  maxQuantity,
   customCurvePoints,
   pricePerK = 0,
   previewSchedule,
@@ -112,7 +114,7 @@ export function EngagementTypeCard({
 
   // Get provider limits
   const providerMin = minQuantity ?? PROVIDER_MINIMUMS[type] ?? 10;
-  const providerMax = PROVIDER_MAXIMUMS[type] || 1000000;
+  const providerMax = maxQuantity && maxQuantity > 0 ? maxQuantity : (PROVIDER_MAXIMUMS[type] || 1000000);
 
   // Use per-type settings or defaults
   const timeLimitHours = config.timeLimitHours ?? DEFAULT_ORGANIC_SETTINGS.timeLimitHours;

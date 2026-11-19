@@ -74,7 +74,8 @@ async function claimRun(): Promise<any | null> {
 
   const detail = await pool.query(
     `SELECT rs.*,eoi.provider_mappings,eoi.user_provider_account_id,
-            eo.link,eo.id AS engagement_order_id
+            eo.link,eo.id AS engagement_order_id,
+            COALESCE(rs.custom_comments, eoi.custom_comments) as comments_text
        FROM lovable_legacy.organic_run_schedule rs
        JOIN lovable_legacy.engagement_order_items eoi ON eoi.id=rs.engagement_order_item_id
        JOIN lovable_legacy.engagement_orders eo ON eo.id=eoi.engagement_order_id
@@ -122,6 +123,9 @@ async function dispatch(run: any): Promise<void> {
         link: run.link,
         quantity: String(run.quantity_to_send),
       });
+      if (run.comments_text && String(run.comments_text).trim()) {
+        params.set("comments", String(run.comments_text).trim());
+      }
       let response: Response;
       try {
         response = await fetch(safePanelUrl(account.api_url), {

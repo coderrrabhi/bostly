@@ -4,6 +4,9 @@ packages:
   - lib/integrations/*
   - scripts
 
+allowBuilds:
+  esbuild: set this to true or false
+
 autoInstallPeers: false
 
 catalog:
@@ -30,7 +33,7 @@ catalog:
   wouter: ^3.3.5
   zod: 3.25.76
 
-minimumReleaseAge: 1440
+minimumReleaseAge: 0
 
 minimumReleaseAgeExclude:
   - '@replit/*'

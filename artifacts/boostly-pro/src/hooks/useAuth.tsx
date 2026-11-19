@@ -118,8 +118,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!active) return;
       setCloudSession(session);
-      setAuthUser(session?.user ? { id: session.user.id, email: session.user.email ?? '' } : null);
-      setClerkLoaded(true);
+      if (session?.user) {
+        setAuthUser({ id: session.user.id, email: session.user.email ?? '' });
+        setClerkLoaded(true);
+      } else {
+        // A missing Cloud session does not mean the VPS cookie is signed out.
+        // Keep auth pending until the cookie check finishes, before guards run.
+        void loadMe();
+      }
     });
     const h = () => void loadMe();
     window.addEventListener('boostly:auth-changed', h);

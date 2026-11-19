@@ -192,6 +192,19 @@ export default function Admin() {
           </Card>
         </Link>
 
+        <Link to="/admin/devices">
+          <Card className="glass-card hover:border-primary/50 transition-all cursor-pointer group">
+            <CardContent className="p-5 flex items-center gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-primary/15 flex items-center justify-center"><Users className="h-6 w-6 text-primary" /></div>
+              <div className="flex-1">
+                <h3 className="font-semibold group-hover:text-primary transition-colors">Device Access (1 Gmail = 1 device)</h3>
+                <p className="text-xs text-muted-foreground">Allow extra devices, remove devices, or log out all users</p>
+              </div>
+              <ArrowUpRight className="h-5 w-5 text-primary" />
+            </CardContent>
+          </Card>
+        </Link>
+
         {/* Quick Access Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <Link to="/admin/users">
