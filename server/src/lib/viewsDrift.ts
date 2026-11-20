@@ -55,8 +55,11 @@ export function driftAdjustment(opts: {
   const up = Math.floor(opts.runQuantity * 0.5);
   // Spread outstanding ratio debt in proportion to the remaining saved curve
   // quantities, rather than clearing all debt in the next (possibly tiny) run.
-  const weighted = opts.remainingBase && opts.remainingBase > 0
-    ? Math.round(owed * Math.min(1, opts.runQuantity / opts.remainingBase)) : owed;
+  // Round away from zero (bounded by the debt) so small runs still carry at
+  // least 1 of an outstanding add-on instead of rounding it to 0 every run.
+  const share = opts.remainingBase && opts.remainingBase > 0 ? owed * Math.min(1, opts.runQuantity / opts.remainingBase) : owed;
+  const weighted = owed > 0 ? Math.min(owed, Math.max(1, Math.ceil(share)))
+    : owed < 0 ? Math.max(owed, Math.min(-1, Math.floor(share))) : 0;
   let adj = Math.max(-Math.min(up, opts.runQuantity - Math.max(1, opts.min)), Math.min(up, weighted));
   if (opts.max > 0) adj = Math.min(adj, opts.max - opts.runQuantity);
   return adj;
@@ -67,9 +70,19 @@ export function driftAdjustment(opts: {
  * engagement (within min/max), so dispatch-time changes never create two
  * runs with the same quantity. Returns `q` if no free value exists.
  */
-export function nearestUnused(q: number, used: number[], min: number, max: number): number {
+export function nearestUnused(q: number, used: number[], min: number, max: number, planned?: number): number {
   const taken = new Set(used);
   if (!taken.has(q)) return q;
+  // An add-on must stay an add-on: search away from the planned quantity first,
+  // so uniqueness never silently cancels an extra-views adjustment.
+  if (planned !== undefined && q !== planned) {
+    const dir = q > planned ? 1 : -1;
+    for (let v = q + dir; dir > 0 ? (max <= 0 || v <= max) : v >= Math.max(1, min); v += dir) {
+      if (!taken.has(v)) return v;
+      if (Math.abs(v - q) > 10000) break;
+    }
+    for (let v = q - dir; v !== planned; v -= dir) if (!taken.has(v)) return v;
+  }
   const lo = Math.max(1, min);
   for (let d = 1; d <= 10000; d += 1) {
     const up = q + d;

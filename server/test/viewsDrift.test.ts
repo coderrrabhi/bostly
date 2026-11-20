@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { driftAdjustment, viewsDrift } from "../src/lib/viewsDrift.ts";
+import { driftAdjustment, nearestUnused, viewsDrift } from "../src/lib/viewsDrift.ts";
 
 const v = (rows: [number, number | null][]) => rows.map(([q, sc], i) => ({ runNumber: i + 1, quantity: q, startCount: sc, completed: true }));
 
@@ -70,4 +70,15 @@ test('quantity one cannot jump by 100 percent from an add-on', () => {
   assert.equal(driftAdjustment({ views: v([[200, 100], [200, 10000]]), viewsTotal: 400,
     itemQuantity: 400, appliedSoFar: 0, runQuantity: 1, min: 1, max: 0, lastRun: false,
     remainingBase: 10 }), 0);
+});
+
+test('order #1391: small likes run still carries at least 1 of an outstanding add-on', () => {
+  const views = v([[121, 2], [1013, 123], [168, 1581]]); // ~400 extra views
+  assert.equal(driftAdjustment({ views, viewsTotal: 5734, itemQuantity: 325, appliedSoFar: 3,
+    runQuantity: 10, min: 1, max: 0, lastRun: false, remainingBase: 300 }), 1);
+});
+
+test('order #1391: a taken add-on quantity moves further up, never back to the planned size', () => {
+  // planned 10 + add-on 1 = 11, but 11 and 12 are already used by other runs
+  assert.equal(nearestUnused(11, [11, 12, 32], 5, 15, 10), 13);
 });

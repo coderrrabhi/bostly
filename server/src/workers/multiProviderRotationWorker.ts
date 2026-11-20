@@ -322,7 +322,7 @@ async function applyViewsDrift(run: any): Promise<void> {
     const lower = Math.max(Number(row.min_q) || 1, planned - cap);
     const upper = Math.max(lower, Math.min(Number(row.max_q) || Infinity, planned + cap));
     const quantity = nearestUnused(Math.max(lower, Math.min(upper, planned + adj)),
-      siblings.rows.map((r) => Number(r.quantity_to_send)), lower, upper);
+      siblings.rows.map((r) => Number(r.quantity_to_send)), lower, upper, planned);
     const finalAdj = quantity - planned;
     if (finalAdj === own) return;
     await pool.query(
