@@ -28,3 +28,16 @@ test("orders without views are unchanged", () => {
   const likes = { type: "likes", quantity: 10, runs: [{ scheduled_at: t(0), quantity_to_send: 10 }] };
   assert.equal(paceRunsToViews([likes])[0][0].scheduled_at, t(0));
 });
+
+test("every engagement finishes within 10 minutes after the last Views run", async () => {
+  const { paceRunsToViews } = await import("../src/lib/ratioPacing.ts");
+  const at = (m: number) => new Date(Date.UTC(2026, 10, 19, 18, 0) + m * 60_000).toISOString();
+  const views = Array.from({ length: 24 }, (_, i) => ({ scheduled_at: at(i * 20), quantity_to_send: 144 }));
+  const likes = Array.from({ length: 8 }, (_, i) => ({ scheduled_at: at(60 + i * 60), quantity_to_send: 30 + i }));
+  const [, out] = paceRunsToViews([{ type: "views", quantity: 3456, runs: views }, { type: "likes", quantity: 252, runs: likes }]);
+  const viewsEnd = Date.parse(views.at(-1)!.scheduled_at);
+  const ts = out.map((r) => Date.parse(r.scheduled_at));
+  assert.ok(ts.at(-1)! <= viewsEnd + 10 * 60_000);
+  assert.ok(ts.every((t, i) => i === 0 || t > ts[i - 1]));
+  assert.deepEqual(out.map((r) => r.quantity_to_send), likes.map((r) => r.quantity_to_send));
+});

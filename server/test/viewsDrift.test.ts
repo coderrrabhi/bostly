@@ -82,3 +82,10 @@ test('order #1391: a taken add-on quantity moves further up, never back to the p
   // planned 10 + add-on 1 = 11, but 11 and 12 are already used by other runs
   assert.equal(nearestUnused(11, [11, 12, 32], 5, 15, 10), 13);
 });
+
+test("big extra-views debt grows every remaining run by the same share instead of stopping at half", async () => {
+  const { addOnCap } = await import("../src/lib/viewsDrift.ts");
+  assert.equal(addOnCap(20, 5, 100), 10);   // small debt: half-run limit
+  assert.equal(addOnCap(20, 80, 100), 16);  // 80% debt: run may grow 80%
+  assert.equal(addOnCap(20, 500, 100), 20); // never more than double
+});

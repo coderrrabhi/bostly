@@ -41,6 +41,18 @@ export function viewsDrift(runs: ViewsRun[]): { ordered: number; extra: number }
   return { ordered, extra: latest - baseline - ordered };
 }
 
+/**
+ * Largest change one run may take. Normally half the run's curve size; when
+ * the extra-views debt is bigger than the remaining runs can absorb at half
+ * size, every remaining run grows by the same share (up to 2x), so the
+ * add-on follows the curve shape and is finished by the last run.
+ */
+export function addOnCap(runQuantity: number, owed: number, remainingBase?: number): number {
+  // Tiny runs (1-3) keep the half-size limit so 1 never jumps to 2.
+  const need = runQuantity >= 4 && remainingBase && remainingBase > 0 ? Math.abs(owed) / remainingBase : 0;
+  return Math.floor(runQuantity * Math.min(1, Math.max(0.5, need)));
+}
+
 export function driftAdjustment(opts: {
   views: ViewsRun[]; viewsTotal: number; itemQuantity: number; appliedSoFar: number;
   runQuantity: number; min: number; max: number; lastRun: boolean;
@@ -52,7 +64,7 @@ export function driftAdjustment(opts: {
   const owed = Math.round((opts.itemQuantity / opts.viewsTotal) * d.extra) - opts.appliedSoFar;
   // Never force the remaining debt into the final run: that created a sudden
   // 2x spike. Every run, final included, moves by at most half its curve size.
-  const up = Math.floor(opts.runQuantity * 0.5);
+  const up = addOnCap(opts.runQuantity, owed, opts.remainingBase);
   // Spread outstanding ratio debt in proportion to the remaining saved curve
   // quantities, rather than clearing all debt in the next (possibly tiny) run.
   // Round away from zero (bounded by the debt) so small runs still carry at

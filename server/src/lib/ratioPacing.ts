@@ -24,7 +24,7 @@ export function paceRunsToViews<T extends PacedRun>(
     const sorted = [...item.runs].sort((a, b) => Date.parse(a.scheduled_at) - Date.parse(b.scheduled_at));
     let cum = 0;
     let prev = -Infinity;
-    return sorted.map((run) => {
+    const paced = sorted.map((run) => {
       cum += run.quantity_to_send;
       const neededViews = Math.min(viewsTotal, (cum / item.quantity) * viewsTotal);
       const slot = vCum.find((v) => v.cum >= neededViews - 1e-9) ?? vCum[vCum.length - 1];
@@ -33,5 +33,24 @@ export function paceRunsToViews<T extends PacedRun>(
       prev = at;
       return { ...run, scheduled_at: new Date(at).toISOString() };
     });
+    return finishByViews(paced, vCum[vCum.length - 1].at);
   });
+}
+
+/** Latest an engagement run may be planned: shortly after the last Views run. */
+export const FINISH_AFTER_VIEWS_MS = 10 * 60_000;
+
+/**
+ * Engagement runs planned after the last Views run (+10 min) are pulled into
+ * the time before that limit, keeping their order and spacing them evenly,
+ * so every engagement completes right after Views. Quantities never change.
+ */
+export function finishByViews<T extends PacedRun>(runs: T[], viewsEnd: number): T[] {
+  const limit = viewsEnd + FINISH_AFTER_VIEWS_MS;
+  const firstLate = runs.findIndex((r) => Date.parse(r.scheduled_at) > limit);
+  if (firstLate < 0) return runs;
+  const from = firstLate > 0 ? Date.parse(runs[firstLate - 1].scheduled_at) : Math.min(Date.parse(runs[0].scheduled_at), viewsEnd);
+  const late = runs.length - firstLate;
+  const step = Math.max(60_000, (limit - from) / (late + 0.5));
+  return runs.map((r, i) => (i < firstLate ? r : { ...r, scheduled_at: new Date(from + step * (i - firstLate + 1)).toISOString() }));
 }

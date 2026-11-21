@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { workerPool as pool } from "../db";
 import { decryptProviderCredential } from "../lib/providerCredentials";
 import { logger } from "../lib/logger";
-import { driftAdjustment, nearestUnused } from "../lib/viewsDrift";
+import { addOnCap, driftAdjustment, nearestUnused } from "../lib/viewsDrift";
 import { appendCancelledProviderMark, commentRetryMinutes, isCommentEngagement, preferOtherProvider, runCommentText, shouldFailoverCancelledRun } from "../lib/commentDelivery";
 import { failedRunFailoverBlock, failoverWindowBlock } from "../lib/failoverPolicy";
 import { speedupTicketDelayMinutes, speedupTicketEligible, speedupTicketMessage } from "../lib/deliverySpeedup";
@@ -318,7 +318,7 @@ async function applyViewsDrift(run: any): Promise<void> {
       [run.engagement_order_item_id, run.id],
     );
     // Never send the same quantity as another run of this engagement.
-    const cap = Math.floor(planned * 0.5);
+    const cap = Math.max(Math.floor(planned * 0.5), addOnCap(planned, adj, Number(row.remaining_base) + planned) , Math.abs(adj));
     const lower = Math.max(Number(row.min_q) || 1, planned - cap);
     const upper = Math.max(lower, Math.min(Number(row.max_q) || Infinity, planned + cap));
     const quantity = nearestUnused(Math.max(lower, Math.min(upper, planned + adj)),
@@ -1135,6 +1135,35 @@ async function processDelayedDeliveryTickets(): Promise<void> {
   }
 }
 
+/**
+ * Once every Views run of an order has been delivered, the remaining
+ * like/save/share/repost/comment runs are pulled in so they finish right
+ * after Views (a few minutes apart, order kept) instead of trailing later.
+ */
+async function finishEngagementAfterViews(): Promise<void> {
+  await pool.query(
+    `WITH done AS (
+       SELECT vi.engagement_order_id FROM lovable_legacy.engagement_order_items vi
+        JOIN lovable_legacy.engagement_orders eo ON eo.id=vi.engagement_order_id
+        WHERE vi.engagement_type ~* 'views?$' AND eo.status IN ('pending','processing')
+          AND COALESCE(vi.status,'pending') NOT IN ('paused','cancelled','canceled')
+          AND NOT EXISTS (SELECT 1 FROM lovable_legacy.organic_run_schedule v
+                WHERE v.engagement_order_item_id=vi.id AND v.status NOT IN ('completed','partial','merged','cancelled','canceled','failed'))
+     ), late AS (
+       SELECT rs.id, ROW_NUMBER() OVER (PARTITION BY rs.engagement_order_item_id ORDER BY rs.run_number) AS k
+         FROM lovable_legacy.organic_run_schedule rs
+         JOIN lovable_legacy.engagement_order_items i ON i.id=rs.engagement_order_item_id
+         JOIN done ON done.engagement_order_id=i.engagement_order_id
+        WHERE i.engagement_type !~* 'views?$' AND rs.status='pending' AND rs.provider_order_id IS NULL
+          AND COALESCE(i.status,'pending') NOT IN ('paused','cancelled','canceled')
+          AND rs.scheduled_at>now()+interval '3 minutes'
+     )
+     UPDATE lovable_legacy.organic_run_schedule rs
+        SET scheduled_at=now()+(late.k*3 - 1 + random()) * interval '1 minute',updated_at=now()
+       FROM late WHERE rs.id=late.id`,
+  );
+}
+
 async function checkerTick(): Promise<void> {
   if (checkerRunning && !executorStalled(checkerRunning, checkerStartedAt)) return;
   if (checkerRunning) logger.error({ stalledMs: Date.now() - checkerStartedAt }, "Status checker stalled; starting a fresh tick");
@@ -1143,6 +1172,8 @@ async function checkerTick(): Promise<void> {
   checkerStartedAt = myStart;
   try {
     await rollupFinishedItemsAndOrders();
+    await finishEngagementAfterViews().catch((error) =>
+      logger.warn({ err: error instanceof Error ? error.message : String(error) }, "Finish-after-views pass skipped"));
     const result = await pool.query(
       `WITH candidates AS (
          SELECT rs.id
