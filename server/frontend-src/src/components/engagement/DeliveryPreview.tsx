@@ -13,7 +13,6 @@ import {
 } from "@/lib/engagement-types";
 import { 
   generateOrganicSchedule,
-  coordinateEngagementSchedules,
   formatDuration,
   getPeakLabel,
   FullOrganicConfig,
@@ -27,6 +26,7 @@ import {
 import { format } from "date-fns";
 import { distinctRunList } from "@/lib/curve-plan";
 import { applyPeakHours } from "@/lib/peak-hours";
+import { pacePreviewToViews } from "@/lib/preview-ratio-pacing";
 import { Clock, TrendingUp, Zap, Timer, Calendar, Pencil, Check, X, ChevronDown, ChevronUp } from "lucide-react";
 
 type Platform = 'instagram' | 'tiktok' | 'youtube' | 'twitter' | 'facebook';
@@ -247,7 +247,9 @@ export function DeliveryPreview({ engagements, refreshKey = 0, platform = 'insta
     const runMins: Record<string, number> = Object.fromEntries(enabledTypes.map(({ type, config }) => [type, config.minQuantity && config.minQuantity > 0 ? config.minQuantity : 1]));
     // Peak Hours is an explicit opt-in applied to the final selected curve.
     // OFF leaves quantities untouched; ON keeps total, times and smooth caps.
-    const schedules = coordinateEngagementSchedules(independentSchedules, runMins).map((s) => {
+    // Do not replace the selected curve's quantities with the legacy random
+    // coordinator. Final ratio pacing runs after minimum/uniqueness/peak rules.
+    const shapedSchedules = independentSchedules.map((s) => {
       const min = runMins[s.engagementType] ?? 1;
       const distinct = distinctRunList(s.runs, min);
       const config = stableEngagements[s.engagementType as EngagementType];
@@ -267,6 +269,12 @@ export function DeliveryPreview({ engagements, refreshKey = 0, platform = 'insta
         peakMultiplier: run.peak_multiplier ?? 1,
       })), min);
       return { ...s, runs, runCount: runs.length };
+    });
+    const paced = pacePreviewToViews(shapedSchedules);
+    const schedules = shapedSchedules.map((s, i) => {
+      const runs = paced[i];
+      const first = runs[0], last = runs[runs.length - 1];
+      return { ...s, runs, totalDuration: first && last ? last.scheduledAt.getTime() - first.scheduledAt.getTime() : 0 };
     });
 
     // Merge all runs into a single timeline with unique IDs

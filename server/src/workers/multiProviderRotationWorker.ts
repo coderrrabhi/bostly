@@ -176,10 +176,9 @@ async function claimRun(): Promise<any | null> {
           AND COALESCE(eoi.status,'pending') NOT IN ('paused','cancelled','canceled')
           AND rs.provider_order_id IS NULL
           AND COALESCE(rs.dispatch_uncertain,false)=false
-         ORDER BY
-           CASE WHEN eo.created_at >= now()-interval '24 hours' THEN 0 ELSE 1 END,
-           CASE WHEN eo.created_at >= now()-interval '24 hours' THEN eo.created_at END DESC,
-           rs.scheduled_at,rs.run_number,rs.created_at
+         -- Earliest due run wins regardless of the order's age. New orders
+         -- must not starve a live 48-hour curve after its 24-hour birthday.
+         ORDER BY rs.scheduled_at,rs.run_number,rs.created_at,rs.id
         FOR UPDATE OF rs SKIP LOCKED
         LIMIT 1
      ), claimed AS (
