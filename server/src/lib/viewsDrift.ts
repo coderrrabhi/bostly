@@ -57,6 +57,7 @@ export function driftAdjustment(opts: {
   views: ViewsRun[]; viewsTotal: number; itemQuantity: number; appliedSoFar: number;
   runQuantity: number; min: number; max: number; lastRun: boolean;
   remainingBase?: number;
+  remainingRuns?: number;
 }): number {
   if (!(opts.viewsTotal > 0) || !(opts.itemQuantity > 0)) return 0;
   const d = viewsDrift(opts.views);
@@ -64,12 +65,17 @@ export function driftAdjustment(opts: {
   const owed = Math.round((opts.itemQuantity / opts.viewsTotal) * d.extra) - opts.appliedSoFar;
   // Never force the remaining debt into the final run: that created a sudden
   // 2x spike. Every run, final included, moves by at most half its curve size.
+  // Positive add-ons go only to the curve's larger runs (at or above the
+  // average remaining run size); small runs keep their curve quantity.
+  if (owed > 0 && !opts.lastRun && opts.remainingRuns && opts.remainingRuns > 1 && opts.remainingBase
+    && opts.runQuantity < opts.remainingBase / opts.remainingRuns) return 0;
   const up = addOnCap(opts.runQuantity, owed, opts.remainingBase);
   // Spread outstanding ratio debt in proportion to the remaining saved curve
   // quantities, rather than clearing all debt in the next (possibly tiny) run.
   // Round away from zero (bounded by the debt) so small runs still carry at
   // least 1 of an outstanding add-on instead of rounding it to 0 every run.
-  const share = opts.remainingBase && opts.remainingBase > 0 ? owed * Math.min(1, opts.runQuantity / opts.remainingBase) : owed;
+  const largeBase = opts.remainingBase && opts.remainingRuns ? opts.remainingBase / 2 : opts.remainingBase;
+  const share = largeBase && largeBase > 0 ? owed * Math.min(1, opts.runQuantity / largeBase) : owed;
   const weighted = owed > 0 ? Math.min(owed, Math.max(1, Math.ceil(share)))
     : owed < 0 ? Math.max(owed, Math.min(-1, Math.floor(share))) : 0;
   let adj = Math.max(-Math.min(up, opts.runQuantity - Math.max(1, opts.min)), Math.min(up, weighted));

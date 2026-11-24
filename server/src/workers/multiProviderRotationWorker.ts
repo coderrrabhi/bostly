@@ -275,6 +275,9 @@ async function applyViewsDrift(run: any): Promise<void> {
                  FROM lovable_legacy.organic_run_schedule o
                 WHERE o.engagement_order_item_id=me.id AND o.id<>$1::uuid
                   AND o.provider_order_id IS NULL AND o.status IN ('pending','dispatching')) AS remaining_base,
+              (SELECT COUNT(*) FROM lovable_legacy.organic_run_schedule o
+                WHERE o.engagement_order_item_id=me.id AND o.id<>$1::uuid
+                  AND o.provider_order_id IS NULL AND o.status IN ('pending','dispatching')) AS remaining_runs,
               vi.id AS views_item
          FROM lovable_legacy.engagement_order_items me
          JOIN lovable_legacy.engagement_order_items vi
@@ -309,6 +312,7 @@ async function applyViewsDrift(run: any): Promise<void> {
       viewsTotal: Number(row.views_total), itemQuantity: Number(row.item_quantity), appliedSoFar: Number(row.applied),
       runQuantity: planned, min: Number(row.min_q) || 1, max: Number(row.max_q) || 0, lastRun: Boolean(row.last_run),
       remainingBase: Number(row.remaining_base) + planned,
+      remainingRuns: Number(row.remaining_runs) + 1,
     });
     const siblings = await pool.query(
       `SELECT quantity_to_send FROM lovable_legacy.organic_run_schedule

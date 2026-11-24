@@ -89,3 +89,10 @@ test("big extra-views debt grows every remaining run by the same share instead o
   assert.equal(addOnCap(20, 80, 100), 16);  // 80% debt: run may grow 80%
   assert.equal(addOnCap(20, 500, 100), 20); // never more than double
 });
+
+test("extra add-on skips small curve runs and goes to large runs", () => {
+  const views = v([[100, 1000], [100, 1400]]);
+  const base = { views, viewsTotal: 1000, itemQuantity: 100, appliedSoFar: 0, min: 1, max: 0, lastRun: false, remainingBase: 100, remainingRuns: 4 };
+  assert.equal(driftAdjustment({ ...base, runQuantity: 10 }), 0);
+  assert.ok(driftAdjustment({ ...base, runQuantity: 40 }) > 0);
+});
