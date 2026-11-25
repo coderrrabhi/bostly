@@ -1,7 +1,7 @@
 import { varyRunGaps, curvePlan } from '@/lib/curve-plan';
 import { DeliveryStartTime } from '@/components/engagement/DeliveryStartTime';
 import { loadDeliverySettings, deliveryPayload, type DeliverySettings } from '@/lib/order-delivery-settings';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { PageMeta } from '@/components/seo/PageMeta';
 import { useAuth } from '@/hooks/useAuth';
@@ -134,6 +134,9 @@ export default function MassOrder() {
   const [deliverySettings, setDeliverySettings] = useState<DeliverySettings>(() => loadDeliverySettings());
   const [variance, setVariance] = useState(MIN_VARIANCE_PERCENT);
   const [timeframe, setTimeframe] = useState('Under 24 hours');
+  // Typed custom hours are kept as text so clearing and typing "24" gives 24h.
+  const [massHoursDraft, setMassHoursDraft] = useState('24');
+  useEffect(() => { setMassHoursDraft(String(parseInt(timeframe.replace(/\D/g, '')) || 1)); }, [timeframe]);
   const [campaign, setCampaign] = useState('');
   const [bundleId, setBundleId] = useState('');
   const [rows, setRows] = useState<Row[]>([]);
@@ -614,8 +617,14 @@ export default function MassOrder() {
                       type="number"
                       min={1}
                       className="input-3d h-12 w-24"
-                      value={parseInt(timeframe.replace(/\D/g, '')) || 1}
-                      onChange={e => setTimeframe(`Under ${Math.max(1, Number(e.target.value) || 1)} hours`)}
+                      value={massHoursDraft}
+                      onChange={e => {
+                        const text = e.target.value.replace(/\D/g, '').slice(0, 3);
+                        setMassHoursDraft(text);
+                        const hours = Number(text);
+                        if (text && hours >= 1 && hours <= 168) setTimeframe(`Under ${hours} hours`);
+                      }}
+                      onBlur={() => setMassHoursDraft(String(parseInt(timeframe.replace(/\D/g, '')) || 1))}
                     />
                     <span className="text-xs text-muted-foreground">hours</span>
                   </div>

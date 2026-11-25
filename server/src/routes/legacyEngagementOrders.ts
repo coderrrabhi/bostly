@@ -4,9 +4,11 @@ import { z } from "zod";
 import { requireAuth, type AuthenticatedRequest } from "../middlewares/auth";
 import { resolveLegacyId } from "../lib/identity";
 import { kickRotationExecutor } from "../workers/multiProviderRotationWorker";
+import { runSpacing } from "../lib/runSpacing";
 import { validateCommentOrder } from "../lib/commentDelivery";
 import { paceRunsToViews } from "../lib/ratioPacing";
 import { runMaximum, runMinimum, shapeEngagementRuns } from "../lib/runShaping";
+import { alignPreviewToViews, distinctGaps, isLinkedEngagement, linkRunsToViews, smoothViewsSpikes } from "../lib/viewLinkedRuns";
 
 export function normalizeReelLink(raw: string): string {
   try {
@@ -167,6 +169,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
 
     const prepared: Array<{
       engagement: z.infer<typeof engagementSchema>;
+      previewRuns?: z.infer<typeof engagementSchema>["scheduled_runs"];
       bundleItemId: string;
       userServiceId: string | null;
       providerAccountId: string;
@@ -174,6 +177,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       price: number;
       providerMin: number;
       providerMax: number;
+      runMax: number;
     }> = [];
     let totalPrice = 0;
 
@@ -317,6 +321,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       totalPrice += price;
       prepared.push({
         engagement: { ...engagement, scheduled_runs: runs },
+        previewRuns: builtRuns,
         bundleItemId: bundleItem.rows[0].id,
         userServiceId: cheapest?.user_service_id ?? engagement.user_service_id ?? null,
         providerAccountId: matched[0].user_provider_account_id,
@@ -328,6 +333,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
         price,
         providerMin,
         providerMax,
+        runMax: runMaximum(bundleItem.rows[0].max_quantity, providerMax),
       });
     }
 
@@ -350,16 +356,52 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
 
     // Keep every engagement at its bundle % of views: delay non-view runs
     // until the views scheduled before them reach the same share.
+    // Views-linked sizing: likes/saves/shares/reposts runs are built from the
+    // Views runs (bundle % of each Views run, after it), so they follow the
+    // selected curve. Comments keep their own pacing.
+    const linkedItems = new Set<number>();
+    const viewsItem = prepared.find((item) => /views?$/i.test(item.engagement.type));
+    if (viewsItem?.engagement.scheduled_runs?.length) {
+      viewsItem.engagement.scheduled_runs = smoothViewsSpikes(viewsItem.engagement.scheduled_runs, viewsItem.providerMin, viewsItem.runMax);
+      prepared.forEach((item, i) => {
+        if (item === viewsItem || !isLinkedEngagement(item.engagement.type)) return;
+        const first = item.engagement.scheduled_runs?.[0];
+        if (!first) return;
+        const linked = alignPreviewToViews({
+          views: viewsItem.engagement.scheduled_runs ?? [], runs: (() => {
+            // Runs exactly as shown in the order preview, moved to the chosen start time.
+            const pr = item.previewRuns ?? [];
+            const e = Math.min(...pr.map((r) => Date.parse(r.scheduled_at)));
+            return Number.isFinite(e) ? pr.map((r) => ({ ...first, ...r, scheduled_at: new Date(Date.parse(r.scheduled_at) + startAt - e).toISOString() })) : [];
+          })(),
+          total: item.engagement.quantity, min: item.providerMin, max: item.runMax,
+        }) ?? linkRunsToViews({
+          views: viewsItem.engagement.scheduled_runs ?? [], template: first,
+          total: item.engagement.quantity, min: item.providerMin, max: item.runMax,
+        });
+        if (!linked || linked.reduce((a, r) => a + r.quantity_to_send, 0) !== item.engagement.quantity
+          || linked.some((r) => r.quantity_to_send < item.providerMin || (item.runMax > 0 && r.quantity_to_send > item.runMax))) return;
+        item.engagement.scheduled_runs = linked;
+        linkedItems.add(i);
+      });
+    }
+
     const paced = paceRunsToViews(prepared.map((item) => ({
       type: item.engagement.type,
       quantity: item.engagement.quantity,
       runs: item.engagement.scheduled_runs ?? [],
     })));
     prepared.forEach((item, i) => {
+      if (linkedItems.has(i)) return;
       item.engagement.scheduled_runs = [...paced[i]].sort(
         (a, b) => Date.parse(a.scheduled_at) - Date.parse(b.scheduled_at),
       );
     });
+
+    // Every gap between a type's runs is different (never a fixed interval).
+    for (const item of prepared) {
+      if (item.engagement.scheduled_runs?.length) item.engagement.scheduled_runs = distinctGaps(item.engagement.scheduled_runs);
+    }
 
     totalPrice = Math.round(totalPrice * 10_000) / 10_000;
     const orderResult = await client.query(
@@ -386,7 +428,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
         ],
       );
       const itemId = itemResult.rows[0].id;
-      const runs = item.engagement.scheduled_runs ?? [];
+      const runs = runSpacing(item.engagement.scheduled_runs ?? []);
       const commentLines = (item.engagement.custom_comments ?? '')
         .split(/\r?\n/)
         .map((c: string) => c.trim())
@@ -407,12 +449,12 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
         await client.query(
           `INSERT INTO lovable_legacy.organic_run_schedule
              (order_id,engagement_order_item_id,run_number,scheduled_at,quantity_to_send,
-              base_quantity,variance_applied,peak_multiplier,status,custom_comments)
-           VALUES ($1::uuid,$2::uuid,$3,$4::timestamptz,$5,$6,$7,$8,'pending',$9)`,
+              base_quantity,variance_applied,peak_multiplier,status,custom_comments,planned_at,planned_gap_seconds)
+           VALUES ($1::uuid,$2::uuid,$3,$4::timestamptz,$5,$6,$7,$8,'pending',$9,$10::timestamptz,$11)`,
           [
             order.id, itemId, index + 1, run.scheduled_at, run.quantity_to_send,
             run.base_quantity ?? run.quantity_to_send, run.variance_applied ?? 0,
-            run.peak_multiplier ?? 1, runComments,
+            run.peak_multiplier ?? 1, runComments, run.planned_at, run.planned_gap_seconds,
           ],
         );
       }

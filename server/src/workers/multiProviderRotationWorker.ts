@@ -8,7 +8,7 @@ import { addOnCap, driftAdjustment, nearestUnused } from "../lib/viewsDrift";
 import { appendCancelledProviderMark, commentRetryMinutes, isCommentEngagement, preferOtherProvider, runCommentText, shouldFailoverCancelledRun } from "../lib/commentDelivery";
 import { failedRunFailoverBlock, failoverWindowBlock } from "../lib/failoverPolicy";
 import { speedupTicketDelayMinutes, speedupTicketEligible, speedupTicketMessage } from "../lib/deliverySpeedup";
-import { engagementViewsAllowed, eligibleProviders } from "../lib/dispatchEligibility";
+import { engagementViewsAllowed, eligibleProviders, providerRejection } from "../lib/dispatchEligibility";
 import { requestNeverReachedProvider } from "../lib/providerNetwork";
 
 type Mapping = {
@@ -176,10 +176,38 @@ async function claimRun(): Promise<any | null> {
           AND COALESCE(eoi.status,'pending') NOT IN ('paused','cancelled','canceled')
           AND rs.provider_order_id IS NULL
           AND COALESCE(rs.dispatch_uncertain,false)=false
-         -- Earliest due run wins regardless of the order's age. New orders
-         -- must not starve a live 48-hour curve after its 24-hour birthday.
-         ORDER BY rs.scheduled_at,rs.run_number,rs.created_at,rs.id
-        FOR UPDATE OF rs SKIP LOCKED
+          -- One active run per engagement item across ALL providers. Accepted
+          -- is not completed; an uncertain send cannot expire into permission
+          -- to overlap another paid run.
+          AND NOT EXISTS (
+            SELECT 1 FROM lovable_legacy.organic_run_schedule prev
+             WHERE prev.engagement_order_item_id=rs.engagement_order_item_id
+               AND prev.run_number<rs.run_number
+               AND (prev.status IN ('pending','dispatching','started','processing','dispatch_uncertain')
+                    OR COALESCE(prev.dispatch_uncertain,false))
+          )
+          -- A provider delay never collapses the next gap. Use immutable curve
+          -- spacing AFTER confirmed completion, not mutable retry scheduled_at.
+          AND now() >= COALESCE((
+            SELECT MAX(COALESCE(prev.completed_at,prev.started_at,prev.scheduled_at))
+              FROM lovable_legacy.organic_run_schedule prev
+             WHERE prev.engagement_order_item_id=rs.engagement_order_item_id
+               AND prev.run_number<rs.run_number
+          ), '-infinity'::timestamptz)
+            + (COALESCE(rs.planned_gap_seconds,60) * interval '1 second')
+         -- Views first (engagement follows delivered Views), then runs that are
+         -- freshly due before runs already re-held for the Views ratio, then
+         -- earliest due. Old held runs can no longer delay new orders' runs.
+         -- Runs that just became due (Instant/new orders, on-time runs) go
+         -- before the old overdue backlog, so a new order never waits behind it.
+         -- Runs never attempted (on their real schedule) always go first;
+         -- held/retrying runs re-stamp scheduled_at every minute and must not
+         -- look "fresh" and starve on-time runs of other orders.
+         ORDER BY CASE WHEN rs.error_message IS NULL THEN 0
+                       WHEN rs.error_message LIKE 'Waiting for%' THEN 2 ELSE 1 END,
+                  CASE WHEN eoi.engagement_type ~* 'views?$' THEN 0 ELSE 1 END,
+                  rs.scheduled_at,rs.run_number,rs.created_at,rs.id
+        FOR UPDATE OF eoi,rs SKIP LOCKED
         LIMIT 1
      ), claimed AS (
        UPDATE lovable_legacy.organic_run_schedule rs
@@ -553,9 +581,12 @@ async function dispatch(run: any): Promise<void> {
       return;
     }
     const providerOrderId = body?.order ?? body?.order_id ?? body?.id;
+    // Some panels reject with {"status":"fail","message":"..."} instead of
+    // {"error":"..."}. That is an explicit rejection, not an unknown result.
+    const providerError = providerRejection(body);
 
-    if (!response.ok || body?.error || !providerOrderId) {
-      if (!body?.error) {
+    if (!response.ok || providerError || !providerOrderId) {
+      if (!providerError) {
         await pool.query(
           `UPDATE lovable_legacy.organic_run_schedule SET status='dispatch_uncertain',
               dispatch_uncertain=true,error_message='Provider confirmation missing; verify before resending.',updated_at=now()
@@ -569,7 +600,7 @@ async function dispatch(run: any): Promise<void> {
         `UPDATE lovable_legacy.organic_run_schedule SET dispatch_uncertain=false WHERE id=$1::uuid`, [run.id],
       );
       run.dispatch_uncertain = false;
-      const message = String(body?.error ?? "Provider did not return an order ID.");
+      const message = String(providerError ?? "Provider did not return an order ID.");
       failures.push(`${account.name}: ${message}`);
       await audit(run, isBusyMessage(message) ? "provider_busy_response" : "provider_rejected", account, {
         request: requestPayload,
@@ -655,14 +686,14 @@ async function dispatch(run: any): Promise<void> {
   throw new Error(failures.join(" | ") || "No active provider accepted this run.");
 }
 
-async function holdUnsentRun(run: any, message: string): Promise<void> {
+async function holdUnsentRun(run: any, message: string, waitMinutes = 1): Promise<void> {
   await pool.query(
     `UPDATE lovable_legacy.organic_run_schedule
         SET status='pending',claim_token=NULL,claimed_at=NULL,rotation_lock_key=NULL,
             user_provider_account_id=NULL,user_provider_account_name=NULL,error_message=$1,
-            scheduled_at=now()+interval '1 minute',updated_at=now()
+            scheduled_at=now()+($3 * interval '1 minute'),updated_at=now()
       WHERE id=$2::uuid AND status='dispatching' AND provider_order_id IS NULL`,
-    [message, run.id],
+    [message, run.id, waitMinutes],
   );
 }
 
@@ -680,7 +711,10 @@ async function confirmedViewsDispatchAllowed(run: any): Promise<boolean> {
        COALESCE((SELECT SUM(GREATEST(0,s.quantity_to_send-COALESCE(s.drift_adjustment,0)))
          FROM lovable_legacy.organic_run_schedule s
          WHERE s.engagement_order_item_id=me.id AND s.id<>$1::uuid
-           AND (s.provider_order_id IS NOT NULL OR s.status IN ('dispatching','dispatch_uncertain'))),0) AS sent_base
+           AND (s.provider_order_id IS NOT NULL OR s.status IN ('dispatching','dispatch_uncertain'))),0) AS sent_base,
+       EXISTS (SELECT 1 FROM lovable_legacy.organic_run_schedule va
+         WHERE va.engagement_order_item_id=vi.id
+           AND va.status IN ('pending','dispatching','started','processing','dispatch_uncertain')) AS views_active
      FROM lovable_legacy.engagement_order_items me
      LEFT JOIN lovable_legacy.engagement_order_items vi
        ON vi.engagement_order_id=me.engagement_order_id AND vi.engagement_type ~* 'views?$'
@@ -692,7 +726,11 @@ async function confirmedViewsDispatchAllowed(run: any): Promise<boolean> {
     viewsTotal: Number(row?.views_total || 0), viewsDelivered: Number(row?.views_delivered || 0),
     itemTotal: Number(row?.item_total || 0), alreadySentBase: Number(row?.sent_base || 0),
     runBase: Math.max(0, Number(run.quantity_to_send) - Number(run.drift_adjustment || 0)) });
-  if (!allowed) await holdUnsentRun(run, 'Waiting for confirmed Views delivery required by this engagement ratio.');
+  // Engagement never outruns delivered Views. While Views are still running,
+  // re-check every minute; once Views stopped, only late provider counts can
+  // unlock it, so re-check every 10 minutes.
+  if (!allowed) await holdUnsentRun(run, 'Waiting for confirmed Views delivery required by this engagement ratio.',
+    row?.views_active === false ? 10 : 1);
   return allowed;
 }
 
@@ -1138,35 +1176,6 @@ async function processDelayedDeliveryTickets(): Promise<void> {
   }
 }
 
-/**
- * Once every Views run of an order has been delivered, the remaining
- * like/save/share/repost/comment runs are pulled in so they finish right
- * after Views (a few minutes apart, order kept) instead of trailing later.
- */
-async function finishEngagementAfterViews(): Promise<void> {
-  await pool.query(
-    `WITH done AS (
-       SELECT vi.engagement_order_id FROM lovable_legacy.engagement_order_items vi
-        JOIN lovable_legacy.engagement_orders eo ON eo.id=vi.engagement_order_id
-        WHERE vi.engagement_type ~* 'views?$' AND eo.status IN ('pending','processing')
-          AND COALESCE(vi.status,'pending') NOT IN ('paused','cancelled','canceled')
-          AND NOT EXISTS (SELECT 1 FROM lovable_legacy.organic_run_schedule v
-                WHERE v.engagement_order_item_id=vi.id AND v.status NOT IN ('completed','partial','merged','cancelled','canceled','failed'))
-     ), late AS (
-       SELECT rs.id, ROW_NUMBER() OVER (PARTITION BY rs.engagement_order_item_id ORDER BY rs.run_number) AS k
-         FROM lovable_legacy.organic_run_schedule rs
-         JOIN lovable_legacy.engagement_order_items i ON i.id=rs.engagement_order_item_id
-         JOIN done ON done.engagement_order_id=i.engagement_order_id
-        WHERE i.engagement_type !~* 'views?$' AND rs.status='pending' AND rs.provider_order_id IS NULL
-          AND COALESCE(i.status,'pending') NOT IN ('paused','cancelled','canceled')
-          AND rs.scheduled_at>now()+interval '3 minutes'
-     )
-     UPDATE lovable_legacy.organic_run_schedule rs
-        SET scheduled_at=now()+(late.k*3 - 1 + random()) * interval '1 minute',updated_at=now()
-       FROM late WHERE rs.id=late.id`,
-  );
-}
-
 async function checkerTick(): Promise<void> {
   if (checkerRunning && !executorStalled(checkerRunning, checkerStartedAt)) return;
   if (checkerRunning) logger.error({ stalledMs: Date.now() - checkerStartedAt }, "Status checker stalled; starting a fresh tick");
@@ -1175,8 +1184,6 @@ async function checkerTick(): Promise<void> {
   checkerStartedAt = myStart;
   try {
     await rollupFinishedItemsAndOrders();
-    await finishEngagementAfterViews().catch((error) =>
-      logger.warn({ err: error instanceof Error ? error.message : String(error) }, "Finish-after-views pass skipped"));
     const result = await pool.query(
       `WITH candidates AS (
          SELECT rs.id

@@ -49,7 +49,7 @@ router.post("/legacy/rpc", async (req, res): Promise<void> => {
       try {
         await client.query("BEGIN");
         const runResult = await client.query(
-          `SELECT rs.id,rs.status
+          `SELECT rs.id,rs.status,rs.provider_order_id,rs.dispatch_uncertain
              FROM lovable_legacy.organic_run_schedule rs
              LEFT JOIN lovable_legacy.engagement_order_items eoi
                ON eoi.id=rs.engagement_order_item_id
@@ -61,8 +61,8 @@ router.post("/legacy/rpc", async (req, res): Promise<void> => {
         );
         const run = runResult.rows[0];
         if (!run) throw new Error("Run not found or you do not have permission to edit it.");
-        if (["completed", "partial", "sent", "cancelled"].includes(String(run.status).toLowerCase())) {
-          throw new Error("Cannot reschedule a completed or cancelled run.");
+        if (run.provider_order_id || run.dispatch_uncertain || !['pending','failed'].includes(String(run.status).toLowerCase())) {
+          throw new Error("Only an unsent pending or rejected run can be rescheduled; accepted or uncertain orders stay unchanged.");
         }
 
         await client.query(
@@ -89,7 +89,7 @@ router.post("/legacy/rpc", async (req, res): Promise<void> => {
                   user_provider_account_name=NULL,
                   rotation_lock_key=NULL,
                   updated_at=now()
-            WHERE id=$3::uuid`,
+            WHERE id=$3::uuid AND provider_order_id IS NULL AND COALESCE(dispatch_uncertain,false)=false`,
           [p_quantity, p_scheduled_at, p_run_id],
         );
         await client.query("COMMIT");

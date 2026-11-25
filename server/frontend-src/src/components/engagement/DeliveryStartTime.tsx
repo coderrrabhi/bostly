@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Zap, Timer } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,6 +29,8 @@ function Toggle({ options, value, onChange }: { options: { id: string; label: st
  * provider service minimum and the built-in defaults — see resolveEffectiveMin.
  */
 export function DeliveryStartTime({ value, onChange }: Props) {
+  const [draft, setDraft] = useState(String(value.startDelayMinutes));
+  useEffect(() => { setDraft(String(value.startDelayMinutes)); }, [value.startDelayMinutes]);
   const set = (patch: Partial<DeliverySettings>) => {
     const next = { ...value, ...patch };
     saveDeliverySettings(next);
@@ -51,7 +54,7 @@ export function DeliveryStartTime({ value, onChange }: Props) {
         </div>
         {value.startMode === "instant" ? (
           <p className="text-sm text-muted-foreground flex items-center gap-1.5">
-            <Zap className="w-4 h-4 text-primary" /> First order goes to the provider instantly after you place it.
+            <Zap className="w-4 h-4 text-primary" /> First run goes to the provider right after you place the order.
           </p>
         ) : (
           <div className="flex flex-wrap items-center gap-2">
@@ -61,8 +64,14 @@ export function DeliveryStartTime({ value, onChange }: Props) {
               min={0}
               max={1440}
               className="w-24 h-9"
-              value={value.startDelayMinutes}
-              onChange={(e) => set({ startDelayMinutes: Math.max(0, Math.min(1440, Number(e.target.value) || 0)) })}
+              value={draft}
+              onChange={(e) => {
+                const text = e.target.value.replace(/\D/g, "").slice(0, 4);
+                setDraft(text);
+                const minutes = Number(text);
+                if (text && minutes <= 1440) set({ startDelayMinutes: minutes });
+              }}
+              onBlur={() => setDraft(String(value.startDelayMinutes))}
             />
             <span className="text-sm text-muted-foreground">minutes</span>
             {[5, 10, 15, 30].map((m) => (

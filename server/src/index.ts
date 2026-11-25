@@ -4,6 +4,7 @@ import sirv from "sirv";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { startMultiProviderRotationWorkers } from "./workers/multiProviderRotationWorker";
+import { startOrderRetentionWorker } from "./workers/orderRetentionWorker";
 
 const port = Number(process.env["PORT"] ?? 3000);
 if (Number.isNaN(port) || port <= 0) {
@@ -27,7 +28,7 @@ const server = app.listen(port, (err) => {
     process.exit(1);
   }
   logger.info({ port }, "Server listening");
-  if (process.env["DISABLE_WORKERS"] !== "true") startMultiProviderRotationWorkers();
+  if (process.env["DISABLE_WORKERS"] !== "true") { startMultiProviderRotationWorkers(); startOrderRetentionWorker(); }
 });
 
 server.keepAliveTimeout = 65_000;

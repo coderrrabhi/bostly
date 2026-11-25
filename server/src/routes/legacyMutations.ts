@@ -242,7 +242,8 @@ router.post("/legacy/mutate", async (req, res): Promise<void> => {
          WHERE run.engagement_order_item_id=item.id
            AND orders.user_id=$2::uuid
            AND (${ids ? "run.id=ANY($3::uuid[])" : "run.engagement_order_item_id=$3::uuid"})
-           AND run.status ${requestedStatus === "pending" ? "='failed'" : "IN ('pending','failed','started')"}
+           AND run.status ${requestedStatus === "pending" ? "='failed'" : "IN ('pending','failed')"}
+           AND run.provider_order_id IS NULL AND COALESCE(run.dispatch_uncertain,false)=false
            AND ($4::timestamptz IS NULL OR run.scheduled_at < $4::timestamptz)
          RETURNING run.*`,
         [requestedStatus, uid, ids ?? itemId, beforeTimestamp],

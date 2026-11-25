@@ -24,7 +24,7 @@ import {
 import { toast } from "sonner";
 import { Copy } from "lucide-react";
 import { issueProviderOrderIds } from "./providerOrderIds";
-import { driftAdjustmentSummary, runLiveCount, viewsLiveSummary, formatIST, formatGap, runGaps, extraViewsAfterRun } from "@/lib/run-live-count";
+import { driftAdjustmentSummary, runLiveCount, viewsLiveSummary, formatIST, formatGap, runGaps, runTiming, extraViewsAfterRun } from "@/lib/run-live-count";
 
 const ENGAGEMENT_CONFIG = {
   views: { icon: Eye, label: "Views" },
@@ -47,6 +47,9 @@ interface Run {
   base_quantity: number;
   variance_applied?: number;
   scheduled_at: string;
+  planned_at?: string | null;
+  planned_gap_seconds?: number | null;
+  dispatch_uncertain?: boolean | null;
   started_at?: string;
   completed_at?: string;
   peak_multiplier?: number;
@@ -246,8 +249,9 @@ export function TypeHistoryCard({
 
   // Find next pending run
   const now = new Date();
-  const nextRun = sortedRuns.find(r => getEffectiveStatus(r) === 'pending' && new Date(r.scheduled_at) >= now);
-  const nextRunDue = nextRun ? new Date(nextRun.scheduled_at) : null;
+  const nextRun = sortedRuns.find(r => getEffectiveStatus(r) === 'pending');
+  const nextTiming = nextRun ? runTiming(nextRun, sortedRuns) : null;
+  const nextRunDue = nextTiming?.earliestAt != null ? new Date(nextTiming.earliestAt) : null;
   const isNextDue = nextRunDue && nextRunDue <= now;
 
   const isPaused = itemStatus === 'paused';
@@ -396,10 +400,10 @@ export function TypeHistoryCard({
             <RefreshCw className="h-3 w-3" />
             Auto-updating
           </span>
-          {nextRunDue && (
+          {(nextRunDue || nextTiming?.waitingForRun) && (
             <Badge className="bg-teal-500/20 text-teal-400 border-teal-500/30">
               <Clock className="h-3 w-3 mr-1" />
-              Next: {isNextDue ? 'Due now' : formatDistanceToNow(nextRunDue)}
+              {nextTiming?.waitingForRun ? `Waiting for run #${nextTiming.waitingForRun}` : nextRunDue ? `Next: ${isNextDue ? 'Awaiting dispatch checks' : formatDistanceToNow(nextRunDue)}` : ''}
             </Badge>
           )}
         </div>
@@ -483,9 +487,10 @@ export function TypeHistoryCard({
                 const isActive = effectiveStatus === 'started';
                 const isCompleted = effectiveStatus === 'completed';
                 const isFailed = effectiveStatus === 'failed';
-                const scheduledDate = new Date(run.scheduled_at);
+                const timing = isPending ? runTiming(run, sortedRuns) : null;
+                const scheduledDate = new Date(timing?.earliestAt ?? run.scheduled_at);
                 const isUpcoming = isPending && scheduledDate > now;
-                const isPastDue = scheduledDate < now && isPending;
+                const isPastDue = scheduledDate < now && isPending && !timing?.waitingForRun;
                 const relativeTime = formatDistanceToNow(scheduledDate, { addSuffix: false });
 
                 // Smart status: provider_status > mapped internal status
@@ -493,6 +498,7 @@ export function TypeHistoryCard({
                   if (isAutoCompletedCancel) return 'Completed';
                   if (isCompleted) return 'Completed';
                   if (isActive) return 'Processing';
+                  if (timing?.waitingForRun) return `Waiting for run #${timing.waitingForRun}`;
                   if (run.provider_status) return run.provider_status;
                   if (run.status === 'cancelled') return isAutoCompletedCancel ? 'Completed' : 'CANCELLED';
                   if (isFailed) return 'FAILED';
@@ -600,9 +606,9 @@ export function TypeHistoryCard({
                             </span>
                           )}
                           <span className="flex items-center gap-1">
-                            Scheduled: {formatIST(scheduledDate, true)}
+                            {timing?.waitingForRun ? `After run #${timing.waitingForRun} completes` : `Earliest: ${formatIST(scheduledDate, true)}`}
                             <span className={`ml-1 font-medium ${isActive ? 'text-blue-400' : isPastDue ? 'text-amber-500' : 'text-teal-400'}`}>
-                              ({isPastDue ? `delayed ${relativeTime} — waiting to send` : scheduledDate < now ? `${relativeTime} ago` : `in ${relativeTime}`})
+                              {timing?.waitingForRun ? '' : `(${isPastDue ? `waiting for dispatch checks` : scheduledDate < now ? `${relativeTime} ago` : `in ${relativeTime}`})`}
                             </span>
                           </span>
 
@@ -621,12 +627,27 @@ export function TypeHistoryCard({
                           )}
 
                           {formatGap(gaps[run.run_number]?.planned ?? null) && (
-                            <span className="flex items-center gap-1 text-violet-400" title="Gap before this run">
+                            <span className="flex items-center gap-1 text-violet-400" title="Minimum gap after the previous run completes">
                               <Clock className="h-3 w-3" />
-                              Gap after #{run.run_number - 1}: {formatGap(gaps[run.run_number]?.planned ?? null)}
+                              Gap after #{run.run_number - 1} completes: {formatGap(gaps[run.run_number]?.planned ?? null)}
                               {formatGap(gaps[run.run_number]?.actual ?? null) && <span className="text-muted-foreground">(actual {formatGap(gaps[run.run_number]?.actual ?? null)})</span>}
                             </span>
                           )}
+
+                          {(() => {
+                            const nextRun = sortedRuns.find((r) => r.run_number === run.run_number + 1);
+                            if (!nextRun) return null;
+                            const nextTiming = runTiming(nextRun, sortedRuns);
+                            const nextAt = new Date(nextTiming.earliestAt ?? nextRun.scheduled_at);
+                            const afterDone = run.completed_at ? formatGap(nextAt.getTime() - Date.parse(run.completed_at)) : null;
+                            return (
+                              <span className="flex items-center gap-1 font-medium text-sky-400" title="When the next run is placed">
+                                <CalendarClock className="h-3 w-3" />
+                                Next run #{nextRun.run_number}: {nextTiming.waitingForRun ? `after run #${nextTiming.waitingForRun} completes` : `earliest ${formatIST(nextAt, true)}`} · gap {formatGap(gaps[nextRun.run_number]?.planned ?? null) ?? "—"}
+                                {!nextTiming.waitingForRun && afterDone && <span className="text-muted-foreground">({afterDone} after this run done)</span>}
+                              </span>
+                            );
+                          })()}
 
                           {engagementType === 'views' && (extraAfter as Record<number, number | null>)[run.run_number] != null && (
                             <span className="font-semibold text-emerald-500" title="Reel views gained after this run beyond provider delivery (next provider start count minus this run's end count)">

@@ -1,5 +1,6 @@
 import { Router, type IRouter } from "express";
 import healthRouter from "./health";
+import subscriptionPaymentsRouter from "./subscriptionPayments";
 import legacyAuthRouter from "./legacyAuth";
 import boostlyRouter from "./boostly";
 import legacyDataRouter from "./legacyData";
@@ -13,6 +14,7 @@ import adminDevicesRouter from "./adminDevices";
 const router: IRouter = Router();
 
 router.use(healthRouter);
+router.use(subscriptionPaymentsRouter);
 router.use(legacyAuthRouter);
 router.use(boostlyRouter);
 router.use(legacyDataRouter);

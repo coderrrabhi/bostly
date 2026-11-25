@@ -21,3 +21,16 @@ export function eligibleProviders<T extends { priority?: number; min_quantity?: 
   return mappings.filter(m => providerQuantityEligible(quantity, m.min_quantity, m.max_quantity))
     .sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
 }
+/**
+ * Explicit provider rejection text, or undefined when the reply is not a
+ * rejection. Panels reply either {"error":"..."} or {"status":"fail","message":"..."};
+ * both mean no order was created, so the same run can be retried safely.
+ */
+export function providerRejection(body: any): string | undefined {
+  if (body?.error) return String(body.error);
+  const orderId = body?.order ?? body?.order_id ?? body?.id;
+  if (!orderId && /^(fail|failed|error)$/i.test(String(body?.status ?? ''))) {
+    return String(body?.message ?? body?.msg ?? 'Provider rejected the order.');
+  }
+  return undefined;
+}

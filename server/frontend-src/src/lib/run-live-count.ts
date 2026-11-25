@@ -117,22 +117,37 @@ export function formatIST(value: string | number | Date, withDate = false): stri
 
 export function formatGap(ms: number | null): string | null {
   if (ms === null || !Number.isFinite(ms) || ms < 0) return null;
-  const mins = Math.round(ms / 60000);
-  if (mins < 60) return `${mins}m`;
-  return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, "0")}m`;
+  const secs = Math.round(ms / 1000);
+  const mins = Math.floor(secs / 60), sec = secs % 60;
+  const tail = sec ? ` ${String(sec).padStart(2, "0")}s` : "";
+  if (mins < 60) return `${mins}m${tail}`;
+  return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, "0")}m${tail}`;
 }
 
 /**
  * Gap before each run: the planned gap from the previous run's scheduled time,
  * and once both are known, the actual gap from previous run Done to this Start.
  */
-export function runGaps(runs: Array<{ run_number: number; scheduled_at: string; started_at?: string | null; completed_at?: string | null }>) {
+export type SpacedRun = { run_number: number; scheduled_at: string; planned_at?: string | null; planned_gap_seconds?: number | null; started_at?: string | null; completed_at?: string | null; status?: string; provider_order_id?: string | null; dispatch_uncertain?: boolean | null };
+
+/** Earliest safe time, never a fictional countdown while the prior run is active. */
+export function runTiming(run: SpacedRun, runs: SpacedRun[]) {
+  if (run.provider_order_id || ['completed','partial','cancelled','canceled','merged','failed'].includes(run.status ?? '')) return { waitingForRun: null, earliestAt: Date.parse(run.scheduled_at) };
+  const earlier = runs.filter((r) => r.run_number < run.run_number).sort((a,b) => a.run_number-b.run_number);
+  const waiting = earlier.find((r) => ['pending','dispatching','started','processing','dispatch_uncertain'].includes(r.status ?? '') || r.dispatch_uncertain);
+  if (waiting) return { waitingForRun: waiting.run_number, earliestAt: null };
+  const previousEnd = earlier.reduce((max,r) => Math.max(max, Date.parse(r.completed_at ?? r.started_at ?? r.scheduled_at)), -Infinity);
+  const at = Math.max(Date.parse(run.scheduled_at), previousEnd + (run.planned_gap_seconds ?? 60)*1000);
+  return { waitingForRun: null, earliestAt: Number.isFinite(at) ? at : null };
+}
+
+export function runGaps(runs: SpacedRun[]) {
   const sorted = [...runs].sort((a, b) => a.run_number - b.run_number);
   const out: Record<number, { planned: number | null; actual: number | null }> = {};
   sorted.forEach((run, i) => {
     const prev = sorted[i - 1];
     if (!prev) { out[run.run_number] = { planned: null, actual: null }; return; }
-    const planned = Date.parse(run.scheduled_at) - Date.parse(prev.scheduled_at);
+    const planned = run.planned_gap_seconds != null ? run.planned_gap_seconds*1000 : Date.parse(run.planned_at ?? run.scheduled_at) - Date.parse(prev.planned_at ?? prev.scheduled_at);
     const actual = prev.completed_at && run.started_at ? Date.parse(run.started_at) - Date.parse(prev.completed_at) : NaN;
     out[run.run_number] = { planned: Number.isFinite(planned) ? planned : null, actual: Number.isFinite(actual) ? actual : null };
   });

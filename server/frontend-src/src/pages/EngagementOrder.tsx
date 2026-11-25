@@ -78,6 +78,14 @@ type UserBundle = {
   user_bundle_items?: UserBundleItem[];
 };
 
+const CURVE_SCORES: Record<string, number> = {
+  's-curve': 97, 'smooth-s-curve': 95, 'sunrise-curve': 93, 'steady-growth': 91,
+  'slow-steady': 89, 'zen-flow': 87, 'snowball': 85, 'viral-spike': 83,
+  'early-peak': 81, 'logarithmic-fade': 79, 'slow-burn': 77, 'algo-drip': 75,
+  'morning-kick': 73, 'evening-prime': 71, 'double-peak': 68, 'early-boost': 65,
+  'high-velocity': 60, 'earthquake-323': 55,
+};
+
 export default function EngagementOrder() {
   const navigate = useNavigate();
   const { user, isLoading: authLoading, isAdmin, wallet, refreshWallet } = useAuth();
@@ -277,6 +285,10 @@ export default function EngagementOrder() {
   // Timeframe: 'auto' or 'custom'
   const [timeframeMode, setTimeframeMode] = useState<'auto' | 'custom'>('auto');
   const [customTimeHours, setCustomTimeHours] = useState<number>(6);
+  // Typed text is kept separately so clearing the box and typing "24" gives 24h
+  // (not 124h). Only whole hours 1-168 are applied.
+  const [customHoursDraft, setCustomHoursDraft] = useState<string>('6');
+  useEffect(() => { setCustomHoursDraft(String(customTimeHours)); }, [customTimeHours]);
   // Extended 550+ library state
   const [showExtendedCurves, setShowExtendedCurves] = useState(false);
   const [extendedSeed, setExtendedSeed] = useState<number>(101);
@@ -1144,8 +1156,14 @@ export default function EngagementOrder() {
                       min={1}
                       max={168}
                       className="w-24 h-9 text-sm"
-                      value={customTimeHours}
-                      onChange={(e) => setCustomTimeHours(Math.max(1, Number(e.target.value) || 1))}
+                      value={customHoursDraft}
+                      onChange={(e) => {
+                        const text = e.target.value.replace(/\D/g, '').slice(0, 3);
+                        setCustomHoursDraft(text);
+                        const hours = Number(text);
+                        if (text && hours >= 1 && hours <= 168) setCustomTimeHours(hours);
+                      }}
+                      onBlur={() => setCustomHoursDraft(String(customTimeHours))}
                     />
                     <span className="text-xs text-muted-foreground font-medium">hours</span>
                   </div>
@@ -1221,7 +1239,10 @@ export default function EngagementOrder() {
 
             {/* Top 10 Curated Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-2.5">
-              {CURVE_PRESETS.map((preset) => {
+              {[...CURVE_PRESETS].sort((x, y) => (CURVE_SCORES[y.id] ?? 0) - (CURVE_SCORES[x.id] ?? 0)).map((preset, rankIdx) => {
+                const rank = rankIdx + 1;
+                const rankLabel = rank + (rank % 10 === 1 && rank !== 11 ? 'st' : rank % 10 === 2 && rank !== 12 ? 'nd' : rank % 10 === 3 && rank !== 13 ? 'rd' : 'th');
+                const score = CURVE_SCORES[preset.id] ?? 50;
                 const isSelected = selectedCurveId === preset.id;
                 const pts = preset.getPoints('views');
                 const svgPoints = pts.map(p => `${p.x * 0.9 + 5},${35 - (p.y * 0.28 + 2)}`).join(' ');
@@ -1248,6 +1269,10 @@ export default function EngagementOrder() {
                             {preset.tag}
                           </span>
                         )}
+                      </div>
+                      <div className="flex items-center justify-between gap-1 mb-1">
+                        <span className="text-[10px] font-bold text-primary">{rankLabel}</span>
+                        <span className="text-[10px] font-bold font-mono text-foreground">Score {score}/100</span>
                       </div>
                       <h4 className="text-xs font-bold text-foreground leading-tight">{preset.name}</h4>
                       <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2 leading-snug">

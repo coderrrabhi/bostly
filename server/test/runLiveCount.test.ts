@@ -86,7 +86,7 @@ test("gap before a run shows planned and actual minutes", () => {
     { run_number: 15, scheduled_at: "2026-11-17T13:28:00Z", started_at: "2026-11-17T13:28:30Z" },
   ]);
   assert.equal(more.formatGap(g[15].planned), "18m");
-  assert.equal(more.formatGap(g[15].actual), "14m");
+  assert.equal(more.formatGap(g[15].actual), "13m 30s");
 });
 
 test("chart labels use India time", () => {
