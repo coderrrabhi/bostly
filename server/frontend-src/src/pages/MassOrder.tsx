@@ -23,6 +23,7 @@ import { resolveEffectiveMin } from '@/lib/engagement-order-management';
 import { distinctRunList } from '@/lib/curve-plan';
 import { applyPeakHours } from '@/lib/peak-hours';
 import { MASS_CURVE_AUTO, massCurveChoices, massCurvePreset, warpForPreset } from '@/lib/mass-curve-select';
+import { bundleMaximum, capAtBundleMaximum } from '@/lib/bundleQuantityLimit';
 
 interface Row {
   id: string;
@@ -218,8 +219,13 @@ export default function MassOrder() {
   };
   const grandTotal = useMemo(() => rows.reduce((s, r) => s + perRowCost(r), 0), [rows]);
 
+  const bundleItemFor = (t: string): any =>
+    (selectedBundle?.user_bundle_items || []).find((item: any) => item.engagement_type === t);
+
+  const bundleMaxFor = (t: string): number => bundleMaximum(bundleItemFor(t)?.max_quantity);
+
   const providerMinFor = (t: string): number | undefined => {
-    const bundleItem = (selectedBundle?.user_bundle_items || []).find((item: any) => item.engagement_type === t);
+    const bundleItem = bundleItemFor(t);
     // Bundle-level Min (set on My Bundles page) overrides the provider's minimum.
     const bundleMin = Number(bundleItem?.min_quantity) || 0;
     if (bundleMin > 0) return bundleMin;
@@ -299,20 +305,36 @@ export default function MassOrder() {
     return { runs, builtAt };
   }
 
-  // Views → every other engagement keeps its own random % of views.
+  // Views → every other engagement keeps its own random % of views, capped by
+  // the total Max quantity configured on its My Bundles item.
   function quantitiesFor(views: number, pct: Record<string, number>, comments?: string[]): Record<string, number> {
     const qty: Record<string, number> = {};
     ALL_TYPES.forEach((t) => {
-      if (t === 'views') qty[t] = views;
+      if (t === 'views') qty[t] = capAtBundleMaximum(views, bundleMaxFor(t));
       else if (t === 'comments' && comments && comments.length > 0) qty[t] = comments.length;
       else {
         // % of views decides the quantity; the My Bundles minimum is only a floor
         // (qtyFromPercent would force saves/shares up to hardcoded 10/2 instead).
         const floor = providerMinFor(t) ?? 1;
-        qty[t] = Math.max(floor, Math.round(views * ((pct[t] ?? 0) / 100)));
+        const calculated = Math.max(floor, Math.round(views * ((pct[t] ?? 0) / 100)));
+        qty[t] = capAtBundleMaximum(calculated, bundleMaxFor(t));
       }
     });
     return qty;
+  }
+
+  function rowLimitError(r: Row): string | null {
+    for (const t of Object.keys(r.types).filter((type) => r.types[type])) {
+      const max = bundleMaxFor(t);
+      const min = Number(bundleItemFor(t)?.min_quantity) || 0;
+      if (max > 0 && min > max) return `${t}: My Bundles Min (${min.toLocaleString()}) cannot be greater than Max (${max.toLocaleString()}).`;
+      const quantity = r.qty[t] ?? 0;
+      if (max > 0 && quantity > max) return `${t} quantity ${quantity.toLocaleString()} exceeds My Bundles Max ${max.toLocaleString()}.`;
+      if (t === 'comments' && max > 0 && (r.custom_comments?.length ?? 0) > max) {
+        return `Custom comments (${r.custom_comments?.length}) exceed My Bundles Max ${max.toLocaleString()}. Remove ${(r.custom_comments?.length ?? 0) - max} comment(s).`;
+      }
+    }
+    return null;
   }
 
   function rebuildRow(r: Row, seed = r.seed, peakEnabled = peakUS, curveId = massCurveId): Row {
@@ -335,14 +357,25 @@ export default function MassOrder() {
     const parsed = parseMassOrderInput(raw);
     if (!parsed.length) return toast.error('No valid links found');
     if (!bundleId) return toast.error('Please select a bundle first');
-    const lo = Math.max(1, Math.min(baseQty, baseQtyMax || baseQty));
-    const hi = Math.max(baseQty, baseQtyMax || baseQty);
-
     const items = selectedBundle?.user_bundle_items || [];
+    const invalidConfig = items.find((item: any) => {
+      const max = bundleMaximum(item.max_quantity);
+      const min = Number(item.min_quantity) || 0;
+      return max > 0 && min > max;
+    });
+    if (invalidConfig) {
+      return toast.error(`${invalidConfig.engagement_type}: My Bundles Min cannot be greater than Max.`);
+    }
+
+    const requestedLo = Math.max(1, Math.min(baseQty, baseQtyMax || baseQty));
+    const requestedHi = Math.max(baseQty, baseQtyMax || baseQty);
+    const viewsMax = bundleMaxFor('views');
+    const lo = capAtBundleMaximum(requestedLo, viewsMax);
+    const hi = capAtBundleMaximum(requestedHi, viewsMax);
     const typesToUse = allowedTypes.length ? allowedTypes : ['views'];
     const usedViews = new Set<number>();
 
-    setRows(parsed.map(({ link, comments }, index) => {
+    const nextRows = parsed.map(({ link, comments }, index) => {
       const types: Record<string, boolean> = {};
       ALL_TYPES.forEach(t => { types[t] = false; });
       typesToUse.forEach(t => { types[t] = true; });
@@ -372,7 +405,10 @@ export default function MassOrder() {
         runs,
         builtAt,
       };
-    }));
+    });
+    const invalidRow = nextRows.map(rowLimitError).find(Boolean);
+    if (invalidRow) return toast.error(invalidRow);
+    setRows(nextRows);
     toast.success(massCurveId === MASS_CURVE_AUTO
       ? `${parsed.length} link(s) ready — random views, random ratios and a unique curve per reel!`
       : `${parsed.length} link(s) ready — every reel follows the ${massCurvePreset(massCurveId)?.name ?? 'selected'} curve!`);
@@ -391,7 +427,11 @@ export default function MassOrder() {
   }
 
   function saveEdit(r: Row) {
-    const rebuilt = rebuildRow(r);
+    const limitError = rowLimitError(r);
+    if (limitError) return toast.error(limitError);
+    const qty = Object.fromEntries(Object.entries(r.qty).map(([t, quantity]) => [t, capAtBundleMaximum(quantity, bundleMaxFor(t))]));
+    const baseQuantity = capAtBundleMaximum(r.base_quantity, bundleMaxFor('views'));
+    const rebuilt = rebuildRow({ ...r, base_quantity: baseQuantity, qty });
     setRows(prev => prev.map(x => x.id === r.id ? rebuilt : x));
     setEditing(null);
   }
@@ -404,6 +444,8 @@ export default function MassOrder() {
   async function submit() {
     if (!bundleId) return toast.error('Please select a bundle first');
     if (!rows.length) return toast.error('No rows to submit');
+    const invalidRow = rows.map(rowLimitError).find(Boolean);
+    if (invalidRow) return toast.error(invalidRow);
     const items = selectedBundle?.user_bundle_items || [];
     const serviceMap: Record<string, { service_id: string | null; price: number }> = {};
     items.forEach((i: any) => {
@@ -785,6 +827,9 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                           {providerMinFor(t) ? (
                             <span className="ml-1 text-[10px] text-muted-foreground">min {providerMinFor(t)}</span>
                           ) : null}
+                          {bundleMaxFor(t) > 0 ? (
+                            <span className="ml-1 text-[10px] text-muted-foreground">max {bundleMaxFor(t).toLocaleString()}</span>
+                          ) : null}
                           {t === 'comments' && r.custom_comments?.length ? (
                             <span className="ml-1 text-[10px] text-amber-600 font-semibold">(Custom)</span>
                           ) : null}
@@ -863,10 +908,12 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                     type="number"
                     className="input-3d mt-2"
                     value={editing.base_quantity}
+                    max={bundleMaxFor('views') || undefined}
                     onChange={e => {
                       const b = Number(e.target.value) || 0;
-                      // Views changed → every engagement follows its own random percentage.
-                      setEditing({ ...editing, base_quantity: b, qty: quantitiesFor(b, editing.pct, editing.custom_comments) });
+                      // Views changed → every engagement follows its own random percentage and bundle Max.
+                      const nextQty = quantitiesFor(b, editing.pct, editing.custom_comments);
+                      setEditing({ ...editing, base_quantity: nextQty.views ?? b, qty: nextQty });
                     }}
                   />
                 </div>
@@ -916,10 +963,11 @@ https://instagram.com/p/video3, Great video, Super cool, Best content`}
                       <Input
                         type="number"
                         min={0}
+                        max={bundleMaxFor(t) || undefined}
                         className="h-8 w-20 text-xs text-right"
                         value={editing.qty[t] ?? 0}
                         onChange={e => {
-                          const v = Number(e.target.value) || 0;
+                          const v = capAtBundleMaximum(Number(e.target.value) || 0, bundleMaxFor(t));
                           if (t === 'views') setEditing({ ...editing, base_quantity: v, qty: quantitiesFor(v, editing.pct, editing.custom_comments) });
                           else setEditing({ ...editing, qty: { ...editing.qty, [t]: v } });
                         }}

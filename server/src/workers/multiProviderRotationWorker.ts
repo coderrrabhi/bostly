@@ -176,25 +176,28 @@ async function claimRun(): Promise<any | null> {
           AND COALESCE(eoi.status,'pending') NOT IN ('paused','cancelled','canceled')
           AND rs.provider_order_id IS NULL
           AND COALESCE(rs.dispatch_uncertain,false)=false
-          -- One active run per engagement item across ALL providers. Accepted
-          -- is not completed; an uncertain send cannot expire into permission
-          -- to overlap another paid run.
+          -- Runs go strictly in order: an earlier run that has not been
+          -- sent/accepted (or whose send is uncertain) blocks. A slow provider
+          -- that ACCEPTED a run no longer blocks: the next run goes at its
+          -- planned time, and the per-provider rotation lock sends it to a
+          -- provider not busy with this link (priority order). Mirrors
+          -- runTiming() in the frontend run-live-count module.
           AND NOT EXISTS (
             SELECT 1 FROM lovable_legacy.organic_run_schedule prev
              WHERE prev.engagement_order_item_id=rs.engagement_order_item_id
                AND prev.run_number<rs.run_number
-               AND (prev.status IN ('pending','dispatching','started','processing','dispatch_uncertain')
-                    OR COALESCE(prev.dispatch_uncertain,false))
+               AND (COALESCE(prev.dispatch_uncertain,false)
+                    OR (prev.provider_order_id IS NULL AND prev.status IN ('pending','dispatching','dispatch_uncertain')))
           )
-          -- A provider delay never collapses the next gap. Use immutable curve
-          -- spacing AFTER confirmed completion, not mutable retry scheduled_at.
-          AND now() >= COALESCE((
-            SELECT MAX(COALESCE(prev.completed_at,prev.started_at,prev.scheduled_at))
+          -- Planned curve time; when behind plan, catch up at no less than
+          -- half the planned gap after the previous send (never a burst).
+          AND now() >= GREATEST(COALESCE(rs.planned_at,rs.scheduled_at), COALESCE((
+            SELECT MAX(COALESCE(prev.started_at,prev.completed_at,prev.scheduled_at))
               FROM lovable_legacy.organic_run_schedule prev
              WHERE prev.engagement_order_item_id=rs.engagement_order_item_id
                AND prev.run_number<rs.run_number
           ), '-infinity'::timestamptz)
-            + (COALESCE(rs.planned_gap_seconds,60) * interval '1 second')
+            + (COALESCE(rs.planned_gap_seconds,60) * 0.5 * interval '1 second'))
          -- Views first (engagement follows delivered Views), then runs that are
          -- freshly due before runs already re-held for the Views ratio, then
          -- earliest due. Old held runs can no longer delay new orders' runs.

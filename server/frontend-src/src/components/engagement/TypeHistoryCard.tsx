@@ -606,7 +606,7 @@ export function TypeHistoryCard({
                             </span>
                           )}
                           <span className="flex items-center gap-1">
-                            {timing?.waitingForRun ? `After run #${timing.waitingForRun} completes` : `Earliest: ${formatIST(scheduledDate, true)}`}
+                            {timing?.waitingForRun ? `After run #${timing.waitingForRun} is sent` : `Earliest: ${formatIST(scheduledDate, true)}`}
                             <span className={`ml-1 font-medium ${isActive ? 'text-blue-400' : isPastDue ? 'text-amber-500' : 'text-teal-400'}`}>
                               {timing?.waitingForRun ? '' : `(${isPastDue ? `waiting for dispatch checks` : scheduledDate < now ? `${relativeTime} ago` : `in ${relativeTime}`})`}
                             </span>
@@ -627,9 +627,9 @@ export function TypeHistoryCard({
                           )}
 
                           {formatGap(gaps[run.run_number]?.planned ?? null) && (
-                            <span className="flex items-center gap-1 text-violet-400" title="Minimum gap after the previous run completes">
+                            <span className="flex items-center gap-1 text-violet-400" title="Planned gap after the previous run is sent">
                               <Clock className="h-3 w-3" />
-                              Gap after #{run.run_number - 1} completes: {formatGap(gaps[run.run_number]?.planned ?? null)}
+                              Gap after #{run.run_number - 1}: {formatGap(gaps[run.run_number]?.planned ?? null)}
                               {formatGap(gaps[run.run_number]?.actual ?? null) && <span className="text-muted-foreground">(actual {formatGap(gaps[run.run_number]?.actual ?? null)})</span>}
                             </span>
                           )}
@@ -643,7 +643,7 @@ export function TypeHistoryCard({
                             return (
                               <span className="flex items-center gap-1 font-medium text-sky-400" title="When the next run is placed">
                                 <CalendarClock className="h-3 w-3" />
-                                Next run #{nextRun.run_number}: {nextTiming.waitingForRun ? `after run #${nextTiming.waitingForRun} completes` : `earliest ${formatIST(nextAt, true)}`} · gap {formatGap(gaps[nextRun.run_number]?.planned ?? null) ?? "—"}
+                                Next run #{nextRun.run_number}: {nextTiming.waitingForRun ? `after run #${nextTiming.waitingForRun} is sent` : `earliest ${formatIST(nextAt, true)}`} · gap {formatGap(gaps[nextRun.run_number]?.planned ?? null) ?? "—"}
                                 {!nextTiming.waitingForRun && afterDone && <span className="text-muted-foreground">({afterDone} after this run done)</span>}
                               </span>
                             );

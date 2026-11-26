@@ -89,7 +89,7 @@ export function LiveStatsBoard({
           {nextRun && (
             <Badge className="bg-secondary/50 text-foreground border-border px-3 py-1.5">
               <Timer className="h-4 w-4 mr-1.5" />
-              Next: {formatDistanceToNow(new Date(nextRun.scheduled_at))}
+              Next: {new Date(nextRun.scheduled_at).getTime() <= Date.now() ? 'due now' : formatDistanceToNow(new Date(nextRun.scheduled_at))}
             </Badge>
           )}
         </div>

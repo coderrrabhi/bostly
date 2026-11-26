@@ -9,6 +9,7 @@ import { validateCommentOrder } from "../lib/commentDelivery";
 import { paceRunsToViews } from "../lib/ratioPacing";
 import { runMaximum, runMinimum, shapeEngagementRuns } from "../lib/runShaping";
 import { alignPreviewToViews, distinctGaps, isLinkedEngagement, linkRunsToViews, smoothViewsSpikes } from "../lib/viewLinkedRuns";
+import { assertWithinBundleMaximum, bundleMaximum } from "../lib/bundleQuantityLimit";
 
 export function normalizeReelLink(raw: string): string {
   try {
@@ -202,7 +203,6 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
     }
 
     for (const engagement of input.engagements) {
-      validateCommentOrder(engagement.type, engagement.custom_comments, engagement.quantity);
       const bundleItem = await client.query(
         `SELECT id, min_quantity, max_quantity FROM lovable_legacy.user_bundle_items
          WHERE user_bundle_id=$1::uuid AND user_id=$2::uuid
@@ -212,6 +212,17 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
         [input.user_bundle_id, userId, engagement.user_bundle_item_id ?? null, engagement.type],
       );
       if (!bundleItem.rows[0]) throw new Error(`Bundle service not found for ${engagement.type}.`);
+
+      const bundleMax = assertWithinBundleMaximum(
+        engagement.type,
+        engagement.quantity,
+        bundleItem.rows[0].max_quantity,
+      );
+      const configuredMin = bundleMaximum(bundleItem.rows[0].min_quantity);
+      if (bundleMax > 0 && configuredMin > bundleMax) {
+        throw new Error(`${engagement.type}: My Bundles Min cannot be greater than Max.`);
+      }
+      validateCommentOrder(engagement.type, engagement.custom_comments, engagement.quantity);
 
       const allowed = await client.query(
         `SELECT m.user_provider_account_id, m.provider_service_id, m.priority,

@@ -126,18 +126,28 @@ export function formatGap(ms: number | null): string | null {
 
 /**
  * Gap before each run: the planned gap from the previous run's scheduled time,
- * and once both are known, the actual gap from previous run Done to this Start.
+ * and once both are known, the actual gap from previous run Start to this Start.
  */
 export type SpacedRun = { run_number: number; scheduled_at: string; planned_at?: string | null; planned_gap_seconds?: number | null; started_at?: string | null; completed_at?: string | null; status?: string; provider_order_id?: string | null; dispatch_uncertain?: boolean | null };
 
-/** Earliest safe time, never a fictional countdown while the prior run is active. */
+/** Late runs may catch up at this fraction of their planned gap, never faster. */
+export const CATCH_UP_GAP_FRACTION = 0.5;
+
+/**
+ * Earliest dispatch time, the same rule the server queue uses: runs go in
+ * order (an earlier run that is not yet sent/accepted blocks), but a slow
+ * provider that has accepted a run no longer blocks — the next run goes at
+ * its planned time to a provider not busy with this link. When behind plan,
+ * runs catch up at no less than half their planned gap after the previous send.
+ */
 export function runTiming(run: SpacedRun, runs: SpacedRun[]) {
   if (run.provider_order_id || ['completed','partial','cancelled','canceled','merged','failed'].includes(run.status ?? '')) return { waitingForRun: null, earliestAt: Date.parse(run.scheduled_at) };
   const earlier = runs.filter((r) => r.run_number < run.run_number).sort((a,b) => a.run_number-b.run_number);
-  const waiting = earlier.find((r) => ['pending','dispatching','started','processing','dispatch_uncertain'].includes(r.status ?? '') || r.dispatch_uncertain);
+  const waiting = earlier.find((r) => r.dispatch_uncertain || (!r.provider_order_id && ['pending','dispatching','dispatch_uncertain'].includes(r.status ?? '')));
   if (waiting) return { waitingForRun: waiting.run_number, earliestAt: null };
-  const previousEnd = earlier.reduce((max,r) => Math.max(max, Date.parse(r.completed_at ?? r.started_at ?? r.scheduled_at)), -Infinity);
-  const at = Math.max(Date.parse(run.scheduled_at), previousEnd + (run.planned_gap_seconds ?? 60)*1000);
+  const previousSent = earlier.reduce((max,r) => Math.max(max, Date.parse(r.started_at ?? r.completed_at ?? r.scheduled_at)), -Infinity);
+  const planned = Date.parse(run.planned_at ?? run.scheduled_at);
+  const at = Math.max(planned, Date.parse(run.scheduled_at), previousSent + (run.planned_gap_seconds ?? 60)*1000*CATCH_UP_GAP_FRACTION);
   return { waitingForRun: null, earliestAt: Number.isFinite(at) ? at : null };
 }
 
@@ -148,7 +158,7 @@ export function runGaps(runs: SpacedRun[]) {
     const prev = sorted[i - 1];
     if (!prev) { out[run.run_number] = { planned: null, actual: null }; return; }
     const planned = run.planned_gap_seconds != null ? run.planned_gap_seconds*1000 : Date.parse(run.planned_at ?? run.scheduled_at) - Date.parse(prev.planned_at ?? prev.scheduled_at);
-    const actual = prev.completed_at && run.started_at ? Date.parse(run.started_at) - Date.parse(prev.completed_at) : NaN;
+    const actual = prev.started_at && run.started_at ? Date.parse(run.started_at) - Date.parse(prev.started_at) : NaN;
     out[run.run_number] = { planned: Number.isFinite(planned) ? planned : null, actual: Number.isFinite(actual) ? actual : null };
   });
   return out;
