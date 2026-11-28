@@ -13,7 +13,7 @@ globalThis.__dbQuery = async (sql, params) => {
   if (sql.includes('SELECT id FROM lovable_legacy.user_bundles')) return { rows: [{ id: 'bundle' }] };
   if (sql.includes('r.run_number=1')) return { rows: globalThis.__recentStarts ?? [] };
   if (sql.includes('FROM lovable_legacy.user_bundle_items')) return { rows: [{ id: 'item', min_quantity: 1, max_quantity: 10000 }] };
-  if (sql.includes('SELECT m.user_provider_account_id')) return { rows: [{ user_provider_account_id: account, provider_service_id: '1', rate: 1, min_quantity: 1, max_quantity: 100, user_service_id: account }] };
+  if (sql.includes('SELECT m.user_provider_account_id')) return { rows: [{ user_provider_account_id: account, provider_service_id: '1', rate: 1, min_quantity: globalThis.__providerMin ?? 1, max_quantity: globalThis.__providerMax ?? 100, user_service_id: account }] };
   if (sql.includes('INSERT INTO lovable_legacy.engagement_orders')) return { rows: [{ id: account, order_number: 439 }] };
   if (sql.includes('INSERT INTO lovable_legacy.engagement_order_items')) return { rows: [{ id: account }] };
   return { rows: [], rowCount: 1 };
@@ -77,6 +77,23 @@ test('placed orders start small and avoid the previous Reel starting views', asy
   const inserted = dbQueries.filter(q => q.sql.includes('INSERT INTO lovable_legacy.organic_run_schedule'));
   const firstOf = (n) => inserted.slice(n === 'views' ? 0 : 3).find(q => q.params[2] === 1).params[4];
   assert.notEqual(firstOf('views'), 90);
-  assert.ok(firstOf('likes') < 24);
+  assert.equal(firstOf('likes'), 24, 'valid preview quantities stay unchanged after placement');
   globalThis.__recentStarts = [];
+});
+test('Views minimum 100 repairs an 88-view preview before the final schedule is inserted', async () => {
+  globalThis.__providerMin = 100;
+  globalThis.__providerMax = 10000000;
+  const quantities = [88,115,105,109,113,121,126,124,127,128,120,119,117,115,114,113,110,107,106];
+  const total = quantities.reduce((a,b) => a+b,0);
+  const result = await call('/functions/process-engagement-order', {
+    user_bundle_id: account, link:'https://instagram.com/reel/minimum-test/',base_quantity:total,
+    engagements:[{type:'views',quantity:total,provider_mappings:[{user_provider_account_id:account,provider_service_id:'1'}],
+      scheduled_runs:quantities.map((q,i)=>({quantity_to_send:q,scheduled_at:new Date(Date.now()+i*20*60000).toISOString()}))}],
+  });
+  globalThis.__providerMin = undefined; globalThis.__providerMax = undefined;
+  assert.equal(result.statusCode,201);
+  const saved = dbQueries.filter(q=>q.sql.includes('INSERT INTO lovable_legacy.organic_run_schedule'));
+  assert.equal(saved.length,19);
+  assert.ok(saved.every(q=>q.params[4]>=100));
+  assert.equal(saved.reduce((sum,q)=>sum+q.params[4],0),total);
 });

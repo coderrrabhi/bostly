@@ -410,7 +410,7 @@ export default function EngagementOrder() {
           pricePerK: Number(cheapest.rate) || 0,
           serviceId: null,
           userServiceId: cheapest.id,
-          minQuantity: bundleMin > 0 ? bundleMin : (mins.length > 0 ? Math.min(...mins) : 0),
+          minQuantity: Math.max(bundleMin, mins.length > 0 ? Math.min(...mins) : 0),
           maxQuantity: bundleMax > 0 ? bundleMax : (maxes.length > 0 ? Math.max(...maxes) : undefined),
         };
         return;

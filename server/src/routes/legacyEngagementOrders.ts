@@ -10,6 +10,8 @@ import { paceRunsToViews } from "../lib/ratioPacing";
 import { runMaximum, runMinimum, shapeEngagementRuns } from "../lib/runShaping";
 import { alignPreviewToViews, distinctGaps, isLinkedEngagement, linkRunsToViews, smoothViewsSpikes } from "../lib/viewLinkedRuns";
 import { assertWithinBundleMaximum, bundleMaximum } from "../lib/bundleQuantityLimit";
+import { planningProviderLimits } from '../lib/planningProviderLimits';
+import { decryptProviderCredential } from '../lib/providerCredentials';
 
 export function normalizeReelLink(raw: string): string {
   try {
@@ -226,7 +228,8 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
 
       const allowed = await client.query(
         `SELECT m.user_provider_account_id, m.provider_service_id, m.priority,
-                s.id AS user_service_id, s.rate, s.min_quantity, s.max_quantity
+                s.id AS user_service_id, s.rate, s.min_quantity, s.max_quantity,
+                a.api_url, a.api_key_ciphertext
          FROM lovable_legacy.user_bundle_item_providers m
          JOIN lovable_legacy.user_provider_accounts a
            ON a.id=m.user_provider_account_id AND a.user_id=m.user_id
@@ -235,7 +238,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
           AND s.user_provider_account_id=m.user_provider_account_id
           AND s.provider_service_id=m.provider_service_id
           AND s.is_active=true
-         WHERE m.user_bundle_item_id=$1::uuid AND m.user_id=$2::uuid AND m.enabled=true
+         WHERE m.user_bundle_item_id=$1::uuid AND m.user_id=$2::uuid AND m.enabled=true AND a.is_active=true
          ORDER BY m.priority ASC`,
         [bundleItem.rows[0].id, userId],
       );
@@ -249,8 +252,21 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       const picked = allowed.rows.filter((row) =>
         requested.has(`${row.user_provider_account_id}:${row.provider_service_id}`),
       );
-      const matched = picked.length ? picked : allowed.rows;
-      if (!matched.length) throw new Error(`${engagement.type} has no enabled provider in My Bundles. Enable one provider for ${engagement.type} and try again.`);
+      const candidates = picked.length ? picked : allowed.rows;
+      if (!candidates.length) throw new Error(`${engagement.type} has no enabled provider in My Bundles. Enable one provider for ${engagement.type} and try again.`);
+      const matched = await planningProviderLimits(candidates, async (accountId) => {
+        const account = candidates.find(row => row.user_provider_account_id === accountId);
+        if (!account) return [];
+        const url = new URL(account.api_url);
+        if (url.protocol !== 'https:' || /^(localhost|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(url.hostname) || url.hostname.endsWith('.internal') || url.hostname.endsWith('.local')) throw new Error('Invalid provider URL.');
+        const response = await fetch(url, {
+          method: 'POST', redirect: 'error', signal: AbortSignal.timeout(8000),
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ key: decryptProviderCredential(account.api_key_ciphertext), action: 'services' }),
+        });
+        const body = response.ok ? await response.json() : null;
+        return Array.isArray(body) ? body : [];
+      });
 
       const services = matched.filter((row) => row.user_service_id);
       const pricedServices = services.filter((row) => Number(row.rate) > 0);
@@ -258,14 +274,10 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
         (best, row) => !best || Number(row.rate || 0) < Number(best.rate || 0) ? row : best,
         null,
       );
-      const serviceMin = services.length
-        ? Math.min(...services.map((row) => Number(row.min_quantity) || 1))
-        : 1;
-      // My Bundles minimum wins over the provider service minimum.
+      const serviceMin = Math.min(...matched.map((row) => row.min_quantity));
+      // Bundle settings can raise, but never lower, a verified provider minimum.
       const providerMin = runMinimum(bundleItem.rows[0].min_quantity, serviceMin);
-      const providerMax = services.length
-        ? Math.max(...services.map((row) => Number(row.max_quantity) || 0))
-        : 0;
+      const providerMax = Math.max(...matched.map((row) => row.max_quantity));
       // Build runs: if scheduled_runs is empty, or collapsed to 1 run while quantity allows multiple runs,
       // generate multiple organic runs distributed run-wise!
       let inputRuns = (engagement.scheduled_runs?.length ? engagement.scheduled_runs : []).filter(r => r.quantity_to_send > 0);
@@ -412,6 +424,9 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
     // Every gap between a type's runs is different (never a fixed interval).
     for (const item of prepared) {
       if (item.engagement.scheduled_runs?.length) item.engagement.scheduled_runs = distinctGaps(item.engagement.scheduled_runs);
+      if (item.engagement.scheduled_runs?.some(run => run.quantity_to_send < item.providerMin)) {
+        throw new Error(`${item.engagement.type} has a final run below provider minimum ${item.providerMin}.`);
+      }
     }
 
     totalPrice = Math.round(totalPrice * 10_000) / 10_000;

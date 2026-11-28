@@ -27,6 +27,7 @@ import { format } from "date-fns";
 import { distinctRunList } from "@/lib/curve-plan";
 import { applyPeakHours } from "@/lib/peak-hours";
 import { pacePreviewToViews } from "@/lib/preview-ratio-pacing";
+import { enforcePlanningMinimum } from '@/lib/provider-run-minimum';
 import { Clock, TrendingUp, Zap, Timer, Calendar, Pencil, Check, X, ChevronDown, ChevronUp } from "lucide-react";
 
 type Platform = 'instagram' | 'tiktok' | 'youtube' | 'twitter' | 'facebook';
@@ -251,7 +252,9 @@ export function DeliveryPreview({ engagements, refreshKey = 0, platform = 'insta
     // coordinator. Final ratio pacing runs after minimum/uniqueness/peak rules.
     const shapedSchedules = independentSchedules.map((s) => {
       const min = runMins[s.engagementType] ?? 1;
-      const distinct = distinctRunList(s.runs, min);
+      const bounded = enforcePlanningMinimum(s.runs.map(run => ({ ...run, quantity_to_send: run.quantity })), min)
+        .map(run => ({ ...run, quantity: run.quantity_to_send, baseQuantity: run.quantity_to_send }));
+      const distinct = distinctRunList(bounded, min);
       const config = stableEngagements[s.engagementType as EngagementType];
       const peaked = applyPeakHours(
         distinct.map((run) => ({

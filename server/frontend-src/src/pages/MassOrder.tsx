@@ -19,7 +19,7 @@ import { MIN_VARIANCE_PERCENT, applyCurveStyle, curveStyleFor, minOrderFor, norm
 import { toast } from 'sonner';
 import { NoBundleBanner } from '@/components/NoBundleBanner';
 import { coordinateEngagementSchedules, generateOrganicSchedule, generateRandomVaryingRuns } from '@/lib/organic-algorithm';
-import { resolveEffectiveMin } from '@/lib/engagement-order-management';
+import { enforceRunMinimums, resolveEffectiveMin } from '@/lib/engagement-order-management';
 import { distinctRunList } from '@/lib/curve-plan';
 import { applyPeakHours } from '@/lib/peak-hours';
 import { MASS_CURVE_AUTO, massCurveChoices, massCurvePreset, warpForPreset } from '@/lib/mass-curve-select';
@@ -226,9 +226,6 @@ export default function MassOrder() {
 
   const providerMinFor = (t: string): number | undefined => {
     const bundleItem = bundleItemFor(t);
-    // Bundle-level Min (set on My Bundles page) overrides the provider's minimum.
-    const bundleMin = Number(bundleItem?.min_quantity) || 0;
-    if (bundleMin > 0) return bundleMin;
     const mins = (bundleItem?.user_bundle_item_providers || [])
       .filter((mapping: any) => mapping.enabled && mapping.provider_service_id)
       .map((mapping: any) => {
@@ -287,7 +284,7 @@ export default function MassOrder() {
     Object.keys(styled).forEach((t) => { runs[t] = styled[t]; });
     // Clean up: drop zero/negative runs and keep the exact total (respecting provider/custom minimum).
     Object.keys(runs).forEach((t) => {
-      const normalized = normalizeRunTotals(runs[t], qty[t] ?? 0, effectiveMins[t] ?? 1);
+      const normalized = enforceRunMinimums(normalizeRunTotals(runs[t], qty[t] ?? 0, effectiveMins[t] ?? 1), effectiveMins[t] ?? 1);
       const peakRuns = applyPeakHours(normalized, peakEnabled, effectiveMins[t] ?? 1);
       runs[t] = distinctRunList(
         peakRuns.map((run, index) => ({ ...run, quantity: run.quantity_to_send, runNumber: index + 1 })),

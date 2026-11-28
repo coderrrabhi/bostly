@@ -7,8 +7,8 @@ const runsOf = (qs: number[]) => qs.map((q, i) => ({ scheduled_at: t(i * 20), qu
 const sum = (rs: { quantity_to_send: number }[]) => rs.reduce((a, r) => a + r.quantity_to_send, 0);
 function seeded(seed: number) { return () => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed / 2 ** 31; }; }
 
-test("My Bundles minimum 1 wins over a provider minimum of 10", () => {
-  assert.equal(runMinimum(1, 10), 1);
+test("My Bundles cannot lower the provider minimum", () => {
+  assert.equal(runMinimum(1, 10), 10);
   assert.equal(runMinimum(10, 1), 10);
   assert.equal(runMinimum(null, 5), 5);
 });

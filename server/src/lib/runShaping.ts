@@ -1,3 +1,5 @@
+import { enforcePlanningMinimum, planningMinimum } from './provider-run-minimum.ts';
+
 export type ShapeRun = {
   scheduled_at: string;
   quantity_to_send: number;
@@ -14,14 +16,10 @@ const byTime = <T extends ShapeRun>(runs: T[]) =>
 const withQty = <T extends ShapeRun>(run: T, q: number): T => ({ ...run, quantity_to_send: q, base_quantity: q });
 
 /**
- * My Bundles minimum is the per-run floor the customer chose; it wins over
- * the provider service minimum. Without a bundle minimum the service minimum
- * (or 1) applies.
+ * My Bundles can raise the per-run floor, never lower the provider minimum.
  */
 export function runMinimum(bundleMin: unknown, serviceMin: unknown): number {
-  const b = Math.floor(Number(bundleMin) || 0);
-  if (b > 0) return b;
-  return Math.max(1, Math.floor(Number(serviceMin) || 0));
+  return planningMinimum(bundleMin, serviceMin);
 }
 
 /** Smallest positive cap among the bundle and provider maximums (0 = none). */
@@ -185,17 +183,7 @@ export function differentStart<T extends ShapeRun>(
 
 /** Merge any run below the minimum into the largest run (totals unchanged). */
 export function mergeBelowMinimum<T extends ShapeRun>(runs: T[], min: number): T[] {
-  const list = byTime(runs).filter((r) => r.quantity_to_send > 0).map((r) => ({ ...r }));
-  const big = list.filter((r) => r.quantity_to_send >= min);
-  const small = list.filter((r) => r.quantity_to_send < min);
-  if (!small.length) return list;
-  const total = list.reduce((a, r) => a + r.quantity_to_send, 0);
-  if (!big.length) return list.length ? [withQty(list[list.length - 1], total)] : list;
-  for (const s of small) {
-    const idx = big.reduce((bi, x, i) => (x.quantity_to_send > big[bi].quantity_to_send ? i : bi), 0);
-    big[idx] = withQty(big[idx], big[idx].quantity_to_send + s.quantity_to_send);
-  }
-  return big;
+  return enforcePlanningMinimum(byTime(runs), min);
 }
 
 

@@ -1,3 +1,5 @@
+import { enforcePlanningMinimum, planningMinimum } from './provider-run-minimum.ts';
+
 export function isOrderVisible(order: { status?: string }) {
   return order.status !== 'deleted';
 }
@@ -38,25 +40,7 @@ export function enforceRunMinimums<T extends { quantity_to_send: number; base_qu
   runs: T[],
   providerMin = 1,
 ): T[] {
-  const min = Math.max(1, providerMin || 1);
-  const list = runs.filter((r) => r.quantity_to_send > 0).map((r) => ({ ...r }));
-  if (list.length === 0) return list;
-  const big = list.filter((r) => r.quantity_to_send >= min);
-  const small = list.filter((r) => r.quantity_to_send < min);
-  if (big.length === 0) {
-    // Every run is below the minimum — merge all into a single run.
-    const total = list.reduce((a, r) => a + r.quantity_to_send, 0);
-    const merged = { ...list[0] };
-    merged.quantity_to_send = total;
-    merged.base_quantity = total;
-    return [merged];
-  }
-  for (const s of small) {
-    const idx = big.reduce((bi, x, i) => (x.quantity_to_send > big[bi].quantity_to_send ? i : bi), 0);
-    big[idx].quantity_to_send += s.quantity_to_send;
-    big[idx].base_quantity = big[idx].quantity_to_send;
-  }
-  return big;
+  return enforcePlanningMinimum(runs, providerMin);
 }
 
 /**
@@ -71,9 +55,7 @@ export function resolveEffectiveMin(
   serviceMin: number | null | undefined,
   fallbackMin?: number | null,
 ): number {
-  const bundle = Number(bundleMin) || 0;
-  if (bundle > 0) return Math.max(1, Math.floor(bundle));
-  return Math.max(Number(serviceMin) || 0, Number(fallbackMin) || 0, 1);
+  return planningMinimum(bundleMin, serviceMin, fallbackMin);
 }
 
 export async function loadAllEngagementOrders(client: any, userId: string, select: string) {
