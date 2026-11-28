@@ -45,6 +45,8 @@ import { FullOrganicConfig, generateRandomVaryingRuns } from "@/lib/organic-algo
 import { Textarea } from "@/components/ui/textarea";
 import { MIN_VARIANCE_PERCENT, minOrderFor, normalizeRunTotals, randomRatioPercent, US_PEAK_LABEL, curveStyleFor } from "@/lib/organic-extras";
 import { enforceRunMinimums, resolveEffectiveMin } from "@/lib/engagement-order-management";
+import { exactPreview } from '@/lib/preview-contract';
+import { activeCustomComments } from '@/lib/custom-comments';
 import { Flame, MessageSquare } from "lucide-react";
 
 type EngagementConfigs = Record<string, EngagementConfig>;
@@ -146,9 +148,10 @@ export default function EngagementOrder() {
   const [deliverySettings, setDeliverySettings] = useState<DeliverySettings>(() => loadDeliverySettings());
   // Custom comments (one per line) for the comments type.
   const [customCommentsText, setCustomCommentsText] = useState('');
+  const [customCommentsEnabled, setCustomCommentsEnabled] = useState(false);
   const customComments = useMemo(
-    () => customCommentsText.split(/\r?\n/).map((c) => c.trim()).filter(Boolean),
-    [customCommentsText],
+    () => activeCustomComments(customCommentsEnabled, customCommentsText),
+    [customCommentsEnabled, customCommentsText],
   );
 
   // Local settings toggles (defaulted from localStorage)
@@ -707,6 +710,7 @@ export default function EngagementOrder() {
         body: {
           user_id: user.id,
           user_bundle_id: bundle.id,
+          preview_required: true,
           bundle_id: null,
           link: link.trim(),
           order_name: orderName.trim(),
@@ -727,44 +731,14 @@ export default function EngagementOrder() {
                 effectiveTimeLimit = 0;
               }
 
-              // Build scheduled runs, filtering out zero-quantity entries (organic
-              // scheduler can produce them via variance/rounding) and redistributing
-              // any lost quantity onto the last run.
-              // IMPORTANT: if the preview schedule is stale (user changed quantities
-              // after the preview was generated), its run totals won't match
-              // config.quantity. In that case we drop the schedule entirely and let
-              // the server create a single clean run — this avoids the
-              // "schedule quantity does not match its order quantity" error.
+              // Snapshot the displayed plan without changing any quantities.
               const rawRuns = (previewSchedules[type] ?? []).map((run, index) => ({
                 ...run,
                 run_number: index + 1,
               }));
-              let filteredRuns = rawRuns.length > 0
-                ? normalizeRunTotals(rawRuns, config.quantity, config.minQuantity ?? 1)
-                : [];
-              // The curve generator can emit a run below the provider minimum;
-              // the server rejects the whole order then, so merge those runs up.
-              filteredRuns = enforceRunMinimums(filteredRuns, config.minQuantity ?? 1);
-              const filteredTotal = filteredRuns.reduce((s, r) => s + r.quantity_to_send, 0);
-
-              if (filteredRuns.length === 0 || filteredTotal !== config.quantity) {
-                const effectiveMin = Math.max(1, config.minQuantity ?? 1);
-                const maxSlots = Math.min(10, Math.max(2, Math.floor(config.quantity / effectiveMin)));
-                const qtys = generateRandomVaryingRuns(config.quantity, effectiveMin, maxSlots);
-                const baseTime = Date.now() + 5 * 60_000;
-                const totalDur = (effectiveTimeLimit || 4) * 60 * 60_000;
-                const gap = qtys.length > 1 ? totalDur / (qtys.length - 1) : 30 * 60_000;
-                filteredRuns = qtys.map((qty, i) => ({
-                  run_number: i + 1,
-                  scheduled_at: new Date(baseTime + i * gap).toISOString(),
-                  quantity_to_send: qty,
-                  base_quantity: qty,
-                  variance_applied: 0,
-                  peak_multiplier: 1,
-                }));
-              }
-
-              const scheduledRuns = filteredRuns;
+              // Submit exactly the displayed plan. A stale/invalid preview must be
+              // refreshed visibly, never normalized or regenerated during submit.
+              const scheduledRuns = exactPreview(rawRuns, config.quantity, config.minQuantity ?? 1);
 
               return {
                 type,
@@ -1415,19 +1389,24 @@ export default function EngagementOrder() {
           <Card className="glass-card border-2 border-border">
             <CardContent className="p-4 sm:p-6 space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <Label className="text-base font-bold tracking-tight text-foreground flex items-center gap-2"><MessageSquare className="h-4 w-4" /> Custom Comments (optional)</Label>
-                {customComments.length > 0 && (
-                  <Badge variant="outline" className="text-xs">{customComments.length} comments</Badge>
-                )}
+                <Label htmlFor="custom-comments-enabled" className="text-base font-bold tracking-tight text-foreground flex items-center gap-2"><MessageSquare className="h-4 w-4" /> Custom Comments</Label>
+                <div className="flex items-center gap-2 shrink-0">
+                  {customComments.length > 0 && <Badge variant="outline" className="text-xs">{customComments.length} comments</Badge>}
+                  <span className="text-xs text-muted-foreground">{customCommentsEnabled ? 'On' : 'Off'}</span>
+                  <Switch id="custom-comments-enabled" checked={customCommentsEnabled} onCheckedChange={(enabled) => {
+                    setCustomCommentsEnabled(enabled);
+                    if (!enabled) setEngagements(prev => ({ ...prev, comments: { ...prev.comments, enabled: false } }));
+                  }} aria-label="Custom Comments" />
+                </div>
               </div>
               <Textarea
                 rows={4}
                 className="font-mono text-[13px]"
                 placeholder={"One comment per line:\nGreat reel!\nLove this 🔥\nSo good"}
                 value={customCommentsText}
+                disabled={!customCommentsEnabled}
                 onChange={(e) => setCustomCommentsText(e.target.value)}
               />
-              <p className="text-[11px] text-muted-foreground">Leave empty for random comments. When filled, the Comments quantity equals the number of lines.</p>
             </CardContent>
           </Card>
         )}

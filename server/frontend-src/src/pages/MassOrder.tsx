@@ -1,3 +1,4 @@
+import { exactPreview } from '@/lib/preview-contract';
 import { varyRunGaps, curvePlan } from '@/lib/curve-plan';
 import { DeliveryStartTime } from '@/components/engagement/DeliveryStartTime';
 import { loadDeliverySettings, deliveryPayload, type DeliverySettings } from '@/lib/order-delivery-settings';
@@ -469,25 +470,8 @@ export default function MassOrder() {
               .filter((mapping: any) => mapping.enabled && mapping.provider_service_id)
               .sort((a: any, b: any) => (a.priority ?? 999) - (b.priority ?? 999));
             const priceK = serviceMap[t]?.price ?? 0;
-            let runs = (r.runs[t] ?? []).filter((run) => run.quantity_to_send > 0);
-            let runsTotal = runs.reduce((sum, run) => sum + run.quantity_to_send, 0);
-            if ((runsTotal !== q || runs.length === 0) && q > 0) {
-              const effectiveMin = effectiveMins[t] || 1;
-              const maxSlots = Math.min(10, Math.max(2, Math.floor(q / effectiveMin)));
-              const qtys = generateRandomVaryingRuns(q, effectiveMin, maxSlots);
-              const baseTime = Date.now() + 5 * 60_000;
-              const totalDur = hours * 60 * 60_000;
-              const gap = qtys.length > 1 ? totalDur / (qtys.length - 1) : 30 * 60_000;
-              runs = varyRunGaps(qtys.map((qty, i) => ({
-                run_number: i + 1,
-                scheduled_at: new Date(baseTime + i * gap).toISOString(),
-                quantity_to_send: qty,
-                base_quantity: qty,
-                variance_applied: 0,
-                peak_multiplier: 1,
-              })), baseTime, hours);
-              runsTotal = q;
-            }
+            const minimum = resolveEffectiveMin(bundleItem?.min_quantity, providerMinFor(t), minOrderFor(t));
+            const runs = exactPreview(r.runs[t] ?? [], q, minimum);
             return {
               type: t,
               quantity: q,
@@ -506,9 +490,7 @@ export default function MassOrder() {
               time_limit_hours: hours,
               variance_percent: variance,
               peak_hours_enabled: peakUS,
-              scheduled_runs: runsTotal === q
-                ? runs.map((run) => ({ ...run, scheduled_at: new Date(new Date(run.scheduled_at).getTime() + shiftMs).toISOString() }))
-                : undefined,
+              scheduled_runs: runs.map((run) => ({ ...run, scheduled_at: new Date(new Date(run.scheduled_at).getTime() + shiftMs).toISOString() })),
             };
           })
           .filter((e) => e.quantity > 0);
@@ -528,6 +510,7 @@ export default function MassOrder() {
           body: {
             user_id: user?.id,
             user_bundle_id: bundleId,
+            preview_required: true,
             bundle_id: null,
             link: r.link,
             order_name: r.order_name.trim(),

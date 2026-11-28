@@ -1,4 +1,5 @@
 import { pool } from "../db";
+import { exactPreview } from "../lib/preview-contract";
 import { Router, type IRouter } from "express";
 import { z } from "zod";
 import { requireAuth, type AuthenticatedRequest } from "../middlewares/auth";
@@ -142,6 +143,7 @@ const orderSchema = z.object({
   start_delay_minutes: z.coerce.number().int().min(0).max(1440).optional(),
   // Explicit opt-in only. Older clients and omitted flags always save OFF.
   peak_hours_enabled: z.boolean().optional().default(false),
+  preview_required: z.boolean().optional().default(false),
   engagements: z.array(engagementSchema).min(1).max(30),
 });
 
@@ -173,6 +175,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
     const prepared: Array<{
       engagement: z.infer<typeof engagementSchema>;
       previewRuns?: z.infer<typeof engagementSchema>["scheduled_runs"];
+      previewExact: boolean;
       bundleItemId: string;
       userServiceId: string | null;
       providerAccountId: string;
@@ -281,7 +284,13 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       // Build runs: if scheduled_runs is empty, or collapsed to 1 run while quantity allows multiple runs,
       // generate multiple organic runs distributed run-wise!
       let inputRuns = (engagement.scheduled_runs?.length ? engagement.scheduled_runs : []).filter(r => r.quantity_to_send > 0);
-      if (inputRuns.length === 0 || (inputRuns.length === 1 && engagement.quantity >= providerMin * 2)) {
+      const suppliedPreview = engagement.scheduled_runs !== undefined;
+      const previewMax = runMaximum(bundleItem.rows[0].max_quantity, providerMax);
+      if (input.preview_required || suppliedPreview) {
+        inputRuns = exactPreview(engagement.scheduled_runs ?? [], engagement.quantity, providerMin, previewMax,
+          q => matched.some(provider => q >= provider.min_quantity && (provider.max_quantity <= 0 || q <= provider.max_quantity)));
+      }
+      if (inputRuns.length === 0) {
         const effectiveMin = Math.max(1, providerMin);
         const maxSlots = Math.min(10, Math.max(2, Math.floor(engagement.quantity / effectiveMin)));
         const qtys = generateRandomVaryingRunsServer(engagement.quantity, effectiveMin, maxSlots);
@@ -324,7 +333,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       // quantity different from recent Reels (all engagements).
       // A valid customer preview is placed exactly as shown (quantities and run count).
       const runMaxLimit = runMaximum(bundleItem.rows[0].max_quantity, providerMax);
-      const previewExact = inputRuns.length > 0 && builtRuns.length === inputRuns.length
+      const previewExact = suppliedPreview && inputRuns.length > 0 && builtRuns.length === inputRuns.length
         && builtRuns.reduce((s, r) => s + r.quantity_to_send, 0) === engagement.quantity
         && builtRuns.every((r) => Number.isInteger(r.quantity_to_send) && r.quantity_to_send >= providerMin
           && (!(runMaxLimit > 0) || r.quantity_to_send <= runMaxLimit));
@@ -373,11 +382,13 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
     // relative run spacing (the organic curve).
     const startDelayMs = Math.min(1440, Math.max(0, input.start_delay_minutes ?? 0)) * 60_000;
     const startAt = Date.now() + startDelayMs;
+    const previewStart = Math.min(...prepared.filter(item => item.previewExact)
+      .flatMap(item => (item.engagement.scheduled_runs ?? []).map(run => Date.parse(run.scheduled_at))));
     for (const item of prepared) {
       const runs = item.engagement.scheduled_runs ?? [];
       const earliest = Math.min(...runs.map((run) => new Date(run.scheduled_at).getTime()));
       if (!runs.length || !Number.isFinite(earliest)) continue;
-      const shiftMs = startAt - earliest;
+      const shiftMs = startAt - (item.previewExact && Number.isFinite(previewStart) ? previewStart : earliest);
       item.engagement.scheduled_runs = runs.map((run) => ({
         ...run,
         scheduled_at: new Date(new Date(run.scheduled_at).getTime() + shiftMs).toISOString(),
@@ -392,9 +403,9 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
     const linkedItems = new Set<number>();
     const viewsItem = prepared.find((item) => /views?$/i.test(item.engagement.type));
     if (viewsItem?.engagement.scheduled_runs?.length) {
-      if (!(viewsItem as any).previewExact) viewsItem.engagement.scheduled_runs = smoothViewsSpikes(viewsItem.engagement.scheduled_runs, viewsItem.providerMin, viewsItem.runMax);
+      if (!viewsItem.previewExact) viewsItem.engagement.scheduled_runs = smoothViewsSpikes(viewsItem.engagement.scheduled_runs, viewsItem.providerMin, viewsItem.runMax);
       prepared.forEach((item, i) => {
-        if (item === viewsItem || !isLinkedEngagement(item.engagement.type)) return;
+        if (item.previewExact || item === viewsItem || !isLinkedEngagement(item.engagement.type)) return;
         const first = item.engagement.scheduled_runs?.[0];
         if (!first) return;
         const linked = alignPreviewToViews({
@@ -422,7 +433,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       runs: item.engagement.scheduled_runs ?? [],
     })));
     prepared.forEach((item, i) => {
-      if (linkedItems.has(i)) return;
+      if (item.previewExact || linkedItems.has(i)) return;
       item.engagement.scheduled_runs = [...paced[i]].sort(
         (a, b) => Date.parse(a.scheduled_at) - Date.parse(b.scheduled_at),
       );
@@ -430,7 +441,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
 
     // Every gap between a type's runs is different (never a fixed interval).
     for (const item of prepared) {
-      if (item.engagement.scheduled_runs?.length) item.engagement.scheduled_runs = distinctGaps(item.engagement.scheduled_runs);
+      if (!item.previewExact && item.engagement.scheduled_runs?.length) item.engagement.scheduled_runs = distinctGaps(item.engagement.scheduled_runs);
       if (item.engagement.scheduled_runs?.some(run => run.quantity_to_send < item.providerMin)) {
         throw new Error(`${item.engagement.type} has a final run below provider minimum ${item.providerMin}.`);
       }

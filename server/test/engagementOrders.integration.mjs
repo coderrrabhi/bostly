@@ -65,7 +65,7 @@ test('Delete cancels only unsent runs and marks the owned order deleted', async 
   assert.ok(dbQueries.some(q => q.sql.includes('run.provider_order_id IS NULL')));
   assert.ok(dbQueries.some(q => q.sql.includes("SET status='deleted'")));
 });
-test('placed orders start small and avoid the previous Reel starting views', async () => {
+test('placed orders keep the exact displayed views and likes despite recent starts', async () => {
   globalThis.__recentStarts = [{ engagement_type: 'views', quantity_to_send: 90 }];
   const at = (m) => new Date(Date.now() + m * 60_000).toISOString();
   const runs = (qs) => qs.map((q, i) => ({ scheduled_at: at(i * 20), quantity_to_send: q }));
@@ -76,11 +76,11 @@ test('placed orders start small and avoid the previous Reel starting views', asy
   assert.equal(result.statusCode, 201);
   const inserted = dbQueries.filter(q => q.sql.includes('INSERT INTO lovable_legacy.organic_run_schedule'));
   const firstOf = (n) => inserted.slice(n === 'views' ? 0 : 3).find(q => q.params[2] === 1).params[4];
-  assert.notEqual(firstOf('views'), 90);
+  assert.equal(firstOf('views'), 90);
   assert.equal(firstOf('likes'), 24, 'valid preview quantities stay unchanged after placement');
   globalThis.__recentStarts = [];
 });
-test('Views minimum 100 repairs an 88-view preview before the final schedule is inserted', async () => {
+test('Views minimum 100 rejects an 88-view preview instead of silently changing it', async () => {
   globalThis.__providerMin = 100;
   globalThis.__providerMax = 10000000;
   const quantities = [88,115,105,109,113,121,126,124,127,128,120,119,117,115,114,113,110,107,106];
@@ -91,9 +91,31 @@ test('Views minimum 100 repairs an 88-view preview before the final schedule is 
       scheduled_runs:quantities.map((q,i)=>({quantity_to_send:q,scheduled_at:new Date(Date.now()+i*20*60000).toISOString()}))}],
   });
   globalThis.__providerMin = undefined; globalThis.__providerMax = undefined;
-  assert.equal(result.statusCode,201);
+  assert.equal(result.statusCode,400);
   const saved = dbQueries.filter(q=>q.sql.includes('INSERT INTO lovable_legacy.organic_run_schedule'));
-  assert.equal(saved.length,19);
-  assert.ok(saved.every(q=>q.params[4]>=100));
-  assert.equal(saved.reduce((sum,q)=>sum+q.params[4],0),total);
+  assert.equal(saved.length,0);
+  assert.ok(dbQueries.some(q => q.sql === 'ROLLBACK'));
+});
+
+test('proof comments 1,2,6,4 save as the same four runs and a single-run preview stays single', async () => {
+  for (const quantities of [[1,2,6,4], [13]]) {
+    const result = await call('/functions/process-engagement-order', {
+      user_bundle_id: account, link:'https://instagram.com/reel/proof/',base_quantity:13,preview_required:true,
+      engagements:[{type:'comments',quantity:13,custom_comments:Array.from({length:13},(_,i)=>`Comment ${i+1}`).join('\n'),provider_mappings:[{user_provider_account_id:account,provider_service_id:'1'}],
+        scheduled_runs:quantities.map((q,i)=>({quantity_to_send:q,scheduled_at:new Date(Date.now()+i*20*60000).toISOString()}))}],
+    });
+    assert.equal(result.statusCode,201);
+    const saved = dbQueries.filter(q=>q.sql.includes('INSERT INTO lovable_legacy.organic_run_schedule'));
+    assert.deepEqual(saved.map(q=>q.params[4]),quantities);
+    assert.deepEqual(saved.map(q=>q.params[2]),quantities.map((_,i)=>i+1));
+  }
+});
+
+test('missing required preview fails before any order is inserted', async () => {
+  const result = await call('/functions/process-engagement-order', {
+    user_bundle_id:account,link:'https://instagram.com/reel/missing/',base_quantity:13,preview_required:true,
+    engagements:[{type:'likes',quantity:13,provider_mappings:[{user_provider_account_id:account,provider_service_id:'1'}]}],
+  });
+  assert.equal(result.statusCode,400);
+  assert.equal(dbQueries.filter(q=>q.sql.includes('INSERT INTO lovable_legacy.engagement_orders')).length,0);
 });
