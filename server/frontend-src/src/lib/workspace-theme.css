@@ -1,0 +1,291 @@
+/* Boostly's legacy VPS runtime uses HSL triplet tokens (Tailwind 3).
+   Presentation only: no dimensions, spacing, chart data or control logic. */
+.bb-workspace, .dark .bb-workspace {
+  --background: 210 65% 97%;
+  --foreground: 225 24% 14%;
+  --card: 0 0% 100%;
+  --card-foreground: 225 24% 14%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 225 24% 14%;
+  --primary: 218 84% 43%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 210 40% 97%;
+  --secondary-foreground: 225 24% 14%;
+  --muted: 210 35% 97%;
+  --muted-foreground: 222 18% 32%;
+  --accent: 214 95% 94%;
+  --accent-foreground: 218 84% 35%;
+  --border: 214 25% 80%;
+  --input: 214 25% 80%;
+  --ring: 218 84% 43%;
+  --success: 155 76% 28%;
+  --warning: 35 85% 32%;
+  --destructive: 0 72% 44%;
+  --shadow-soft: 0 1px 2px hsl(225 24% 14% / .04), 0 5px 14px hsl(160 35% 20% / .07);
+  --shadow-glow: var(--shadow-soft);
+  --bb-gradient: linear-gradient(hsl(var(--primary)), hsl(var(--primary)));
+  --bb-control-hover: 218 84% 36%;
+  --bb-banner: 214 90% 95%;
+  --bb-banner-foreground: 218 70% 28%;
+  --bb-focus: 0 0 0 3px hsl(var(--ring) / .2);
+  background: hsl(var(--background));
+  font-family: 'Manrope', system-ui, sans-serif;
+}
+
+.bb-workspace :is(h1,h2,h3,h4,h5,h6) {
+  font-family: 'Sora', system-ui, sans-serif;
+  letter-spacing: 0 !important;
+  font-weight: 700;
+}
+.bb-workspace main h1, .bb-workspace .gradient-text {
+  background: none !important;
+  -webkit-text-fill-color: currentColor;
+  color: hsl(var(--foreground)) !important;
+}
+.bb-workspace main h2.bg-clip-text {
+  background: none !important;
+  color: hsl(var(--foreground)) !important;
+}
+.bb-workspace main h2.bg-clip-text .lucide { color: hsl(var(--primary)) !important; }
+.bb-workspace :is(.font-black,.font-extrabold) { font-weight: 700 !important; }
+.bb-workspace :is(.tracking-tight,.tracking-tighter) { letter-spacing: 0 !important; }
+.bb-workspace :is(.glass-card,.three-d-card,.glass-premium,.glass-panel) {
+  border-color: hsl(var(--border)) !important;
+  background: hsl(var(--card));
+  box-shadow: var(--shadow-soft) !important;
+}
+.bb-workspace :is(.glass-card,.three-d-card):hover { box-shadow: var(--shadow-soft) !important; }
+.bb-workspace :is(button.bg-primary,a.bg-primary,.btn-3d) {
+  background: hsl(var(--primary)) !important;
+  color: hsl(var(--primary-foreground)) !important;
+  border: 1px solid hsl(var(--primary)) !important;
+  box-shadow: none !important;
+}
+.bb-workspace :is(button.bg-primary,.btn-3d):hover {
+  background: hsl(var(--bb-control-hover)) !important;
+  filter: none !important;
+  transform: none !important;
+}
+.bb-workspace :is(input,textarea,select,[role="combobox"]) {
+  color: hsl(var(--foreground));
+  border-color: hsl(var(--input));
+  background-color: hsl(var(--muted));
+  box-shadow: none;
+}
+.bb-workspace :is(input,textarea)::placeholder { color: hsl(var(--muted-foreground)) !important; }
+.bb-workspace :is(input,textarea,select,[role="combobox"]):focus-visible {
+  border-color: hsl(var(--ring)) !important;
+  box-shadow: var(--bb-focus) !important;
+}
+.bb-workspace .lucide { stroke-width: 1.8; }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) { background: hsl(var(--card)); }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a { color: hsl(var(--muted-foreground)) !important; font-weight: 600; }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a:hover { background: hsl(var(--accent)) !important; }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[style*="box-shadow"] {
+  background: hsl(var(--accent)) !important;
+  color: hsl(var(--accent-foreground)) !important;
+  box-shadow: inset 0 0 0 1px hsl(var(--primary) / .28) !important;
+}
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[class*="shadow-[inset"] {
+  background: hsl(var(--accent)) !important;
+  color: hsl(var(--accent-foreground)) !important;
+  box-shadow: inset 0 0 0 1px hsl(var(--primary) / .28) !important;
+}
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[class*="shadow-[inset"] svg { color: hsl(var(--accent-foreground)) !important; }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav [class*="text-blue-600"] {
+  color: hsl(var(--primary)) !important;
+  background-color: hsl(var(--accent)) !important;
+  border-color: hsl(var(--primary) / .25) !important;
+}
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[style*="box-shadow"] span:not([class*="text-[9"]),
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[style*="box-shadow"] svg { color: hsl(var(--accent-foreground)) !important; }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a svg { color: currentColor !important; opacity: 1 !important; }
+/* Existing page banners have inline blue gradients; change paint, not layout. */
+.bb-workspace main div.relative.overflow-hidden[style*="linear-gradient"][class*="p-"] {
+  background: hsl(var(--bb-banner)) !important;
+  box-shadow: var(--shadow-soft) !important;
+}
+.bb-workspace main div.relative.overflow-hidden[style*="linear-gradient"][class*="p-"] :is(h1,p,.lucide) {
+  color: hsl(var(--bb-banner-foreground)) !important;
+}
+.bb-workspace table thead tr { background: hsl(var(--muted)); }
+.bb-workspace table tbody tr:hover { background: hsl(var(--accent) / .45); }
+.bb-workspace [role="tablist"] { background: hsl(var(--muted)) !important; }
+.bb-workspace [role="tab"][data-state="active"] {
+  background: hsl(var(--card));
+  color: hsl(var(--primary)) !important;
+  box-shadow: var(--shadow-soft) !important;
+}
+.bb-workspace [role="switch"][data-state="unchecked"] { background: hsl(var(--border)); }
+.bb-workspace [role="switch"][data-state="checked"] { background: hsl(var(--primary)); }
+/* Retired dark-theme text utilities still occur in legacy history/detail.
+   Only faded white labels are normalized, never solid inverse button text. */
+.bb-workspace main :is([class*="text-white/"],[class*="text-primary/40"],[class*="text-blue-500/40"],[class*="text-blue-500/60"]) {
+  color: hsl(var(--muted-foreground)) !important;
+}
+.bb-workspace main [class*="text-blue-500"].font-black,
+.bb-workspace main [class*="text-primary/40"].font-black {
+  color: hsl(var(--primary)) !important;
+}
+.bb-workspace input:disabled, .bb-workspace textarea:disabled { opacity: .7; }
+.bb-workspace main :is(.text-blue-400,.text-cyan-400,.text-teal-400,.text-purple-400):not(.recharts-wrapper *) {
+  color: hsl(var(--primary)) !important;
+}
+.bb-workspace main .text-amber-400:not(.recharts-wrapper *) { color: hsl(var(--warning)) !important; }
+
+
+
+
+/* Dialogs/menus are portalled, but the scope exists only on authenticated pages. */
+body:has(.bb-workspace) :is([role="dialog"],[role="alertdialog"],[data-radix-popper-content-wrapper]) {
+  --background: 210 65% 97%;
+  --foreground: 225 24% 14%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 225 24% 14%;
+  --primary: 218 84% 43%;
+  --primary-foreground: 0 0% 100%;
+  --muted: 210 35% 97%;
+  --muted-foreground: 222 18% 32%;
+  --accent: 214 95% 94%;
+  --accent-foreground: 218 84% 35%;
+  --border: 214 25% 80%;
+  --ring: 218 84% 43%;
+  font-family: 'Manrope', system-ui, sans-serif;
+  color: hsl(var(--foreground));
+}
+body:has(.bb-workspace) [role="dialog"] {
+  box-shadow: 0 12px 40px hsl(225 24% 14% / .16) !important;
+}
+body:has(.bb-workspace) [role="dialog"]::before { display: none; }
+body:has(.bb-workspace) [role="dialog"] :is(.font-black,.font-extrabold) { font-weight: 700 !important; }
+body:has(.bb-workspace) [role="dialog"] :is(button.bg-primary,.btn-3d) {
+  background: hsl(var(--primary)) !important;
+  color: hsl(var(--primary-foreground)) !important;
+  box-shadow: none !important;
+}
+body:has(.bb-workspace) [role="dialog"] :is(input,textarea,select) {
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted));
+  border-color: hsl(var(--border));
+}
+body:has(.bb-workspace) [role="dialog"] :is(input,textarea,select):focus-visible {
+  border-color: hsl(var(--ring)) !important;
+  box-shadow: 0 0 0 3px hsl(var(--ring) / .2) !important;
+}
+
+/* Keep the existing graph palette and SVG geometry untouched. */
+.bb-workspace :is(.recharts-wrapper,svg:not(.lucide)) {
+  --foreground: 0 0% 8%;
+  --muted-foreground: 220 9% 40%;
+  --primary: 238 84% 60%;
+  --accent: 262 83% 62%;
+  --success: 152 62% 38%;
+  color: hsl(var(--foreground));
+}
+.bb-workspace ::-webkit-scrollbar-thumb { background: hsl(var(--border)); }
+/* Colorful light refinement: semantic ink/tint pairs retain readable contrast. */
+.bb-workspace, body:has(.bb-workspace) [role="dialog"] {
+  --bb-blue-ink: 218 84% 38%; --bb-blue-tint: 214 100% 95%;
+  --bb-rose-ink: 337 75% 35%; --bb-rose-tint: 337 95% 96%;
+  --bb-cyan-ink: 190 85% 26%; --bb-cyan-tint: 188 90% 94%;
+  --bb-amber-ink: 32 92% 29%; --bb-amber-tint: 42 100% 94%;
+  --bb-violet-ink: 267 65% 38%; --bb-violet-tint: 267 95% 96%;
+  --bb-green-ink: 156 78% 25%; --bb-green-tint: 153 75% 94%;
+}
+.bb-workspace main :is(h1,h2,h3,h4) { color: hsl(var(--foreground)); font-weight: 700; }
+.bb-workspace main :is(label,.text-muted-foreground) { color: hsl(var(--muted-foreground)); }
+.bb-workspace main :is([class*="text-[10px]"],[class*="text-[10.5px]"],[class*="text-[11px]"]):not(.recharts-wrapper *) {
+  font-size: 12px; line-height: 1.5;
+}
+.bb-workspace main :is(.text-cyan-400,.text-cyan-500,.text-cyan-600,.text-teal-400,.text-teal-500):not(.recharts-wrapper *) { color: hsl(var(--bb-cyan-ink)) !important; }
+.bb-workspace main :is(.text-blue-400,.text-blue-500,.text-blue-600):not(.recharts-wrapper *) { color: hsl(var(--bb-blue-ink)) !important; }
+.bb-workspace main :is(.text-green-400,.text-green-500,.text-emerald-400,.text-emerald-500):not(.recharts-wrapper *) { color: hsl(var(--bb-green-ink)) !important; }
+.bb-workspace main :is(.text-purple-400,.text-purple-500,.text-violet-400,.text-violet-500):not(.recharts-wrapper *) { color: hsl(var(--bb-violet-ink)) !important; }
+.bb-workspace main :is(.text-amber-400,.text-amber-500,.text-orange-400,.text-orange-500):not(.recharts-wrapper *) { color: hsl(var(--bb-amber-ink)) !important; }
+.bb-workspace main :is(.bg-green-100,.bg-emerald-100) { color: hsl(var(--bb-green-ink)); }
+.bb-workspace main :is(.bg-cyan-100,.bg-sky-100) { color: hsl(var(--bb-cyan-ink)); }
+.bb-workspace main :is(.bg-purple-100,.bg-violet-100) { color: hsl(var(--bb-violet-ink)); }
+.bb-workspace main .bg-amber-100 { color: hsl(var(--bb-amber-ink)); }
+/* Section icons get recognizable color, while graph SVGs are excluded. */
+.bb-workspace main .lucide-heart { color: hsl(var(--bb-rose-ink)) !important; }
+.bb-workspace main .lucide-message-circle { color: hsl(var(--bb-cyan-ink)) !important; }
+.bb-workspace main .lucide-bookmark { color: hsl(var(--bb-amber-ink)) !important; }
+.bb-workspace main .lucide-share-2 { color: hsl(var(--bb-violet-ink)) !important; }
+.bb-workspace main .lucide-eye { color: hsl(var(--bb-blue-ink)) !important; }
+.bb-workspace main .lucide-repeat { color: hsl(var(--bb-green-ink)) !important; }
+.bb-workspace main .bg-primary .lucide { color: hsl(var(--primary-foreground)) !important; }
+/* Professional sidebar, same destinations, account identity and permissions. */
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a {
+  --bb-nav-ink: var(--bb-blue-ink); --bb-nav-tint: var(--bb-blue-tint);
+  min-height: 44px; border-radius: 8px; font-size: 13px;
+  color: hsl(var(--foreground)) !important;
+}
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[href="/engagement-order"], .bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[href="/my-bundles"] { --bb-nav-ink: var(--bb-green-ink); --bb-nav-tint: var(--bb-green-tint); }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[href="/mass-order"] { --bb-nav-ink: var(--bb-rose-ink); --bb-nav-tint: var(--bb-rose-tint); }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[href="/ai-intelligence"], .bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[href="/settings"] { --bb-nav-ink: var(--bb-violet-ink); --bb-nav-tint: var(--bb-violet-tint); }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[href="/subscription"], .bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[href="/admin"] { --bb-nav-ink: var(--bb-amber-ink); --bb-nav-tint: var(--bb-amber-tint); }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[href="/support"], .bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[href="/my-providers"] { --bb-nav-ink: var(--bb-cyan-ink); --bb-nav-tint: var(--bb-cyan-tint); }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a svg {
+  width: 28px; height: 28px; padding: 5px; border-radius: 7px;
+  background: hsl(var(--bb-nav-tint)) !important;
+  color: hsl(var(--bb-nav-ink)) !important;
+  stroke-width: 2;
+}
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a[class*="shadow-[inset"], .bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a:hover {
+  background: hsl(var(--bb-nav-tint)) !important;
+  color: hsl(var(--bb-nav-ink)) !important;
+  box-shadow: inset 3px 0 0 hsl(var(--bb-nav-ink)) !important;
+}
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav a:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) nav > p { color: hsl(var(--muted-foreground)) !important; font-size: 11px; letter-spacing: 0; }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) .text-\[15px\] { font-size: 17px; }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) .text-\[8\.5px\] { color: hsl(var(--bb-blue-ink)) !important; letter-spacing: 0; font-size: 10px; }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) > div:last-child { background: hsl(var(--card)); }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) > div:last-child > a {
+  background: hsl(var(--bb-blue-tint)) !important; color: hsl(var(--bb-blue-ink)) !important;
+  box-shadow: none !important; border: 1px solid hsl(var(--border)); border-radius: 8px;
+}
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) > div:last-child > a svg { color: hsl(var(--bb-blue-ink)) !important; }
+/* Restore light paint even if legacy dark preferences are present. */
+.dark .bb-workspace :is(.glass-card,.three-d-card,.glass-premium,.glass-panel) { background: hsl(var(--card)) !important; }
+.dark .bb-workspace :is(input,textarea,select,[role="combobox"]) { background: hsl(var(--muted)) !important; color: hsl(var(--foreground)) !important; }
+.bb-workspace input, .bb-workspace textarea { font-weight: 600; }
+.bb-workspace main :is(.rounded-lg,.rounded-xl):has(> .lucide-link) {
+  background: hsl(var(--bb-violet-tint)) !important;
+  color: hsl(var(--bb-violet-ink)) !important;
+}
+.bb-workspace main :is(.rounded-lg,.rounded-xl):has(> .lucide-eye) {
+  background: hsl(var(--bb-blue-tint)) !important;
+  color: hsl(var(--bb-blue-ink)) !important;
+}
+.bb-workspace main :is(.rounded-lg,.rounded-xl):has(> .lucide-heart) {
+  background: hsl(var(--bb-rose-tint)) !important;
+  color: hsl(var(--bb-rose-ink)) !important;
+}
+.bb-workspace main :is(.rounded-lg,.rounded-xl):has(> .lucide-message-circle) {
+  background: hsl(var(--bb-cyan-tint)) !important;
+  color: hsl(var(--bb-cyan-ink)) !important;
+}
+.bb-workspace main :is(.rounded-lg,.rounded-xl):has(> .lucide-bookmark) {
+  background: hsl(var(--bb-amber-tint)) !important;
+  color: hsl(var(--bb-amber-ink)) !important;
+}
+/* History summary tiles remain in their original grid; only paint changes. */
+.bb-workspace main .grid-cols-4 > div.rounded-lg:nth-child(1) { background: hsl(var(--bb-cyan-tint)); }
+.bb-workspace main .grid-cols-4 > div.rounded-lg:nth-child(2) { background: hsl(var(--bb-green-tint)); }
+.bb-workspace main .grid-cols-4 > div.rounded-lg:nth-child(3) { background: hsl(var(--bb-amber-tint)); }
+.bb-workspace main .grid-cols-4 > div.rounded-lg:nth-child(4) { background: hsl(var(--bb-violet-tint)); }
+.bb-workspace main .grid-cols-4 > div.rounded-lg :is(p,svg) { color: hsl(var(--foreground)); }
+@media (prefers-reduced-motion: reduce) {
+  .bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) * { transition: none !important; }
+}
+
+.bb-workspace main .flex.items-center.justify-between:has(> .flex.shrink-0.flex-wrap) { flex-wrap: wrap; row-gap: 8px; }
+.bb-workspace main .flex.shrink-0.flex-wrap { max-width: 100%; }
+.bb-workspace :is(aside, div.fixed:has(button[aria-label="Close sidebar"])) a[href="https://t.me/whopcampaign"] {
+  background: hsl(var(--bb-blue-tint)) !important;
+  color: hsl(var(--bb-blue-ink)) !important;
+  box-shadow: none !important;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+}
