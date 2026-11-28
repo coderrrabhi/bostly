@@ -322,7 +322,13 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
           }];
       // Small start + mixed run sizes (non-view engagements) and a starting
       // quantity different from recent Reels (all engagements).
-      const runs = shapeEngagementRuns({
+      // A valid customer preview is placed exactly as shown (quantities and run count).
+      const runMaxLimit = runMaximum(bundleItem.rows[0].max_quantity, providerMax);
+      const previewExact = inputRuns.length > 0 && builtRuns.length === inputRuns.length
+        && builtRuns.reduce((s, r) => s + r.quantity_to_send, 0) === engagement.quantity
+        && builtRuns.every((r) => Number.isInteger(r.quantity_to_send) && r.quantity_to_send >= providerMin
+          && (!(runMaxLimit > 0) || r.quantity_to_send <= runMaxLimit));
+      const runs = previewExact ? builtRuns.map((r) => ({ ...r, base_quantity: r.quantity_to_send })) : shapeEngagementRuns({
         type: engagement.type,
         runs: builtRuns,
         min: providerMin,
@@ -345,6 +351,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
       prepared.push({
         engagement: { ...engagement, scheduled_runs: runs },
         previewRuns: builtRuns,
+        previewExact,
         bundleItemId: bundleItem.rows[0].id,
         userServiceId: cheapest?.user_service_id ?? engagement.user_service_id ?? null,
         providerAccountId: matched[0].user_provider_account_id,
@@ -385,7 +392,7 @@ router.post("/functions/process-engagement-order", async (req, res): Promise<voi
     const linkedItems = new Set<number>();
     const viewsItem = prepared.find((item) => /views?$/i.test(item.engagement.type));
     if (viewsItem?.engagement.scheduled_runs?.length) {
-      viewsItem.engagement.scheduled_runs = smoothViewsSpikes(viewsItem.engagement.scheduled_runs, viewsItem.providerMin, viewsItem.runMax);
+      if (!(viewsItem as any).previewExact) viewsItem.engagement.scheduled_runs = smoothViewsSpikes(viewsItem.engagement.scheduled_runs, viewsItem.providerMin, viewsItem.runMax);
       prepared.forEach((item, i) => {
         if (item === viewsItem || !isLinkedEngagement(item.engagement.type)) return;
         const first = item.engagement.scheduled_runs?.[0];
